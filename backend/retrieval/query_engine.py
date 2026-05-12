@@ -474,24 +474,40 @@ class QueryEngine:
 
         # Fall back to local SigLIP
         if visual_embedding is None:
+            siglip = None
             try:
                 from backend.visual.siglip_embedder import SigLIPEmbedder
                 siglip = SigLIPEmbedder()
                 if siglip.enabled:
                     visual_embedding = siglip.embed_text(query)
+            except Exception as exc:
+                logger.debug("Visual query embedding failed: %s", exc)
+            finally:
+                if siglip is not None:
                     siglip.unload()
-            except Exception:
-                pass
 
         if visual_embedding is None:
             return []
 
-        return self.store.query(
-            embedding=visual_embedding,
-            top_k=top_k,
-            video_id=video_id,
-            source_filter="visual",
-        )
+        try:
+            return self.store.query(
+                embedding=visual_embedding,
+                top_k=top_k,
+                video_id=video_id,
+                source_filter="visual",
+            )
+        except Exception as exc:
+            if not self._is_dimension_mismatch(exc):
+                raise
+
+            expected_dim, got_dim = self._parse_dims(str(exc))
+            logger.warning(
+                "Skipping visual vector search because the active ChromaDB collection "
+                "expects %s-dim embeddings but the visual query produced %s-dim.",
+                expected_dim,
+                got_dim,
+            )
+            return []
 
     @staticmethod
     def _merge_multi_vector(

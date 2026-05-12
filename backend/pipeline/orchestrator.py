@@ -326,8 +326,8 @@ class PipelineOrchestrator:
             # searchable independently of the fused embeddings.
             if transcripts:
                 try:
-                    saved = self.db.save_transcripts(video_meta.id, transcripts)
-                    overlaps = self.db.save_transcript_overlaps(video_meta.id, transcripts)
+                    saved = self.db.save_transcripts(meta.id, transcripts)
+                    overlaps = self.db.save_transcript_overlaps(meta.id, transcripts)
                     logger.info(
                         "Persisted %d transcript segments + %d overlaps for FTS5.",
                         saved, overlaps,

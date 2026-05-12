@@ -142,7 +142,24 @@ class TestVideoEndpoints:
         vid = self._ingest(client)
         resp = client.get(f"/video/{vid}/stream")
         assert resp.status_code == 200
+        assert resp.headers["accept-ranges"] == "bytes"
+        assert resp.headers["content-type"].startswith("video/mp4")
         assert len(resp.content) > 0
+
+    def test_stream_video_range_request(self, client):
+        vid = self._ingest(client)
+        resp = client.get(f"/video/{vid}/stream", headers={"Range": "bytes=0-99"})
+        assert resp.status_code == 206
+        assert resp.headers["accept-ranges"] == "bytes"
+        assert resp.headers["content-range"].startswith("bytes 0-99/")
+        assert resp.headers["content-length"] == "100"
+        assert len(resp.content) == 100
+
+    def test_stream_video_unsatisfiable_range(self, client):
+        vid = self._ingest(client)
+        resp = client.get(f"/video/{vid}/stream", headers={"Range": "bytes=999999999-"})
+        assert resp.status_code == 416
+        assert resp.headers["content-range"].startswith("bytes */")
 
 
 class TestFrameSecurityEndpoint:

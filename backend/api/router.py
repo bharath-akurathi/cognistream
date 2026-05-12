@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import math
+import mimetypes
 import shutil
 import subprocess
 import threading
@@ -34,8 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.config import (
@@ -90,6 +91,48 @@ def cleanup_progress(video_id: str) -> None:
     with _progress_lock:
         _progress_store.pop(video_id, None)
         _progress_events.pop(video_id, None)
+
+
+def _parse_range_header(range_header: str, file_size: int) -> tuple[int | None, int | None]:
+    """Parse a single HTTP bytes range into inclusive start/end offsets."""
+    if file_size <= 0 or not range_header.startswith("bytes="):
+        return None, None
+
+    range_spec = range_header.removeprefix("bytes=").split(",", 1)[0].strip()
+    if "-" not in range_spec:
+        return None, None
+
+    start_text, end_text = range_spec.split("-", 1)
+    try:
+        if start_text == "":
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                return None, None
+            start = max(file_size - suffix_length, 0)
+            end = file_size - 1
+        else:
+            start = int(start_text)
+            end = int(end_text) if end_text else file_size - 1
+    except ValueError:
+        return None, None
+
+    if start < 0 or end < start or start >= file_size:
+        return None, None
+
+    return start, min(end, file_size - 1)
+
+
+def _iter_file_range(path: Path, start: int, end: int, chunk_size: int = 1024 * 1024):
+    """Yield bytes from path between inclusive offsets start and end."""
+    with path.open("rb") as handle:
+        handle.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            chunk = handle.read(min(chunk_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
 
 
 def _save_benchmark(video_id: str, payload: dict[str, Any]) -> None:
@@ -773,8 +816,13 @@ async def get_video(video_id: str):
 
 
 @router.get("/video/{video_id}/stream")
-async def stream_video(video_id: str):
-    """Stream the video file (supports range requests via FileResponse)."""
+async def stream_video(video_id: str, request: Request):
+    """Stream the video file with explicit HTTP range support.
+
+    Browser video elements rely on byte ranges for large files, metadata
+    probing, and seeking.  Serving ranges ourselves keeps playback reliable
+    across Starlette versions and avoids forcing every upload to video/mp4.
+    """
     meta = _db.get_video(video_id)
     if meta is None:
         raise HTTPException(404, f"Video not found: {video_id}")
@@ -783,10 +831,44 @@ async def stream_video(video_id: str):
     if not path.is_file():
         raise HTTPException(404, "Video file not found on disk.")
 
-    return FileResponse(
-        path=str(path),
-        media_type="video/mp4",
-        filename=meta.filename,
+    file_size = path.stat().st_size
+    media_type = mimetypes.guess_type(meta.filename or path.name)[0] or "application/octet-stream"
+    range_header = request.headers.get("range")
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Type": media_type,
+        "Content-Disposition": "inline",
+    }
+
+    if not range_header:
+        headers["Content-Length"] = str(file_size)
+        return StreamingResponse(
+            _iter_file_range(path, 0, file_size - 1),
+            media_type=media_type,
+            headers=headers,
+        )
+
+    start, end = _parse_range_header(range_header, file_size)
+    if start is None or end is None:
+        return Response(
+            status_code=416,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes */{file_size}",
+            },
+        )
+
+    content_length = end - start + 1
+    headers.update({
+        "Content-Length": str(content_length),
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+    })
+    return StreamingResponse(
+        _iter_file_range(path, start, end),
+        status_code=206,
+        media_type=media_type,
+        headers=headers,
     )
 
 

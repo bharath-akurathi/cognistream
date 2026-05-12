@@ -296,7 +296,15 @@ class MultimodalEmbedder:
             pass
 
         if backend == "onnx":
-            self._model = SentenceTransformer(self._model_name, backend=backend)
+            try:
+                self._model = SentenceTransformer(self._model_name, backend=backend)
+            except (ImportError, RuntimeError, ValueError) as exc:
+                logger.warning(
+                    "ONNX backend unavailable despite onnxruntime being installed; "
+                    "falling back to default SentenceTransformer backend: %s",
+                    exc,
+                )
+                self._model = SentenceTransformer(self._model_name)
         else:
             self._model = SentenceTransformer(self._model_name)
 
