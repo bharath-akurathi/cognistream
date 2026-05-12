@@ -1,5 +1,7 @@
 # CogniStream
 
+Recorded Demo and further insights : https://drive.google.com/drive/folders/1oyUfRPiHtsRozdE1VZ-S2bfkCsBHaDXs 
+
 Privacy-preserving multimodal video retrieval engine. Search video content with natural language queries like *"Show me when the red car arrived"* — runs fully offline on edge hardware, with optional NVIDIA cloud acceleration.
 
 ## Features
