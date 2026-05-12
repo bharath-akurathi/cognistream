@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,7 +62,6 @@ class VideoLoader:
             VideoLoadError: If the file is missing, too large, or unreadable.
         """
         source = Path(source_path)
-        self._wait_until_ready(source)
         self._validate_file(source)
 
         video_id = uuid.uuid4().hex
@@ -108,29 +106,6 @@ class VideoLoader:
 
     # ── internal helpers ────────────────────────────────────────
 
-    @staticmethod
-    def _wait_until_ready(path: Path, retries: int = 5, delay: float = 1.0) -> None:
-        """Wait until a file is fully written before processing.
-
-        Detects partial copies (e.g. network drive sync, browser upload
-        still in progress) by checking that file size stabilises across
-        two consecutive reads. Borrowed from Moment Search's
-        ``isFileReady`` canary pattern.
-        """
-        prev_size = -1
-        for attempt in range(retries):
-            if not path.exists():
-                if attempt < retries - 1:
-                    time.sleep(delay)
-                    continue
-                return  # _validate_file will raise the proper error
-            cur_size = path.stat().st_size
-            if cur_size > 0 and cur_size == prev_size:
-                return  # size stable → file is ready
-            prev_size = cur_size
-            if attempt < retries - 1:
-                time.sleep(delay)
-
     def _validate_file(self, path: Path) -> None:
         """Check existence, extension, and file size."""
         if not path.exists():
@@ -165,13 +140,7 @@ class VideoLoader:
     def _probe_metadata(
         self, video_id: str, original_name: str, file_path: Path
     ) -> VideoMeta:
-        """Open the video with OpenCV to read duration, fps, and resolution.
-
-        Also probes bitrate, codec, and pixel format via ffprobe (if
-        available) to detect high-bitrate sources that need thumbnail-only
-        preview in the UI. Borrowed from Moment Search's
-        ``needs_thumbnail_preview`` pattern.
-        """
+        """Open the video with OpenCV to read duration, fps, and resolution."""
         cap = cv2.VideoCapture(str(file_path))
         if not cap.isOpened():
             raise VideoLoadError(f"OpenCV cannot open video: {file_path}")
@@ -185,39 +154,6 @@ class VideoLoader:
         finally:
             cap.release()
 
-        # Probe codec/bitrate/pix_fmt via ffprobe for high-bitrate detection
-        bitrate_kbps = 0
-        codec = ""
-        pix_fmt = ""
-        try:
-            import subprocess, json as _json
-            probe = subprocess.run(
-                [
-                    "ffprobe", "-v", "quiet",
-                    "-print_format", "json",
-                    "-show_streams", "-show_format",
-                    str(file_path),
-                ],
-                capture_output=True, text=True, timeout=15,
-            )
-            if probe.returncode == 0:
-                info = _json.loads(probe.stdout)
-                fmt = info.get("format", {})
-                bitrate_kbps = int(float(fmt.get("bit_rate", 0))) // 1000
-                for stream in info.get("streams", []):
-                    if stream.get("codec_type") == "video":
-                        codec = stream.get("codec_name", "")
-                        pix_fmt = stream.get("pix_fmt", "")
-                        break
-        except Exception as exc:
-            logger.debug("ffprobe metadata probe failed: %s", exc)
-
-        # Flag sources that can't stream efficiently in a browser WebView
-        # (ProRes, 4:2:2/4:4:4, or extremely high bitrate).
-        needs_preview = bitrate_kbps > 100_000 or any(
-            f in pix_fmt for f in ("422", "444")
-        )
-
         return VideoMeta(
             id=video_id,
             filename=original_name,
@@ -229,8 +165,4 @@ class VideoLoader:
             total_frames=total_frames,
             status=VideoStatus.UPLOADED,
             created_at=datetime.now(timezone.utc).isoformat(),
-            bitrate_kbps=bitrate_kbps,
-            codec=codec,
-            pix_fmt=pix_fmt,
-            needs_thumbnail_preview=needs_preview,
         )

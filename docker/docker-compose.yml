@@ -18,40 +18,35 @@
 services:
 
   # ── Ollama (Vision Language Model server) ─────────────
-  # DISABLED: the Docker stack runs CPU-only and Ollama in a container
-  # is too slow to be useful (no GPU passthrough). Use NVIDIA cloud VLM
-  # instead via NVIDIA_API_KEY, or run Ollama on the host if you need a
-  # local VLM. Re-enable by uncommenting this block + the depends_on
-  # entry under `backend`.
-  #
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: cognistream-ollama
-  #   volumes:
-  #     - ollama_data:/root/.ollama
-  #     - ./ollama-entrypoint.sh:/entrypoint.sh:ro
-  #   entrypoint: ["/bin/bash", "/entrypoint.sh"]
-  #   environment:
-  #     - OLLAMA_MODEL=moondream2
-  #     - OLLAMA_HOST=0.0.0.0
-  #   ports:
-  #     - "11434:11434"
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         cpus: "2.0"
-  #         memory: 3G
-  #       reservations:
-  #         memory: 1G
-  #   restart: unless-stopped
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "ollama list || exit 1"]
-  #     interval: 15s
-  #     timeout: 10s
-  #     retries: 10
-  #     start_period: 60s
-  #   networks:
-  #     - cognistream
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cognistream-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./ollama-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/bash", "/entrypoint.sh"]
+    environment:
+      - OLLAMA_MODEL=moondream2
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_NUM_PARALLEL=4
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - cognistream
 
   # ── ChromaDB (vector database) ────────────────────────
   chromadb:
@@ -86,7 +81,6 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
-    image: cognistream-backend:latest
     container_name: cognistream-backend
     volumes:
       - app_data:/app/data
@@ -94,6 +88,7 @@ services:
       - COGNISTREAM_ROOT=/app
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=moondream2
+      - VLM_WORKERS=1
       - OLLAMA_TIMEOUT=120
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
@@ -113,8 +108,8 @@ services:
         reservations:
           memory: 512M
     depends_on:
-      # ollama:
-      #   condition: service_healthy
+      ollama:
+        condition: service_healthy
       chromadb:
         condition: service_healthy
     restart: unless-stopped
@@ -157,8 +152,8 @@ services:
 # ── Volumes ─────────────────────────────────────────────
 # Named volumes persist data across container restarts.
 volumes:
-  # ollama_data:
-  #   driver: local
+  ollama_data:
+    driver: local
   chroma_data:
     driver: local
   app_data:

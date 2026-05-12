@@ -35,10 +35,6 @@ class VideoMeta:
     created_at: str = ""
     processed_at: Optional[str] = None
     error_message: Optional[str] = None
-    bitrate_kbps: int = 0
-    codec: str = ""
-    pix_fmt: str = ""
-    needs_thumbnail_preview: bool = False
 
 
 @dataclass
@@ -121,5 +117,3 @@ class SearchResult:
     score: float
     event_type: Optional[str] = None
     frame_url: Optional[str] = None
-    speech_snippet: Optional[str] = None
-    related_count: int = 0

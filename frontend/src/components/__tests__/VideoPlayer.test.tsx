@@ -27,7 +27,6 @@ describe("VideoPlayer", () => {
     const video = document.querySelector("video");
     expect(video).toBeInTheDocument();
     expect(video?.src).toContain("/api/video/123/stream");
-    expect(video?.getAttribute("preload")).toBe("metadata");
   });
 
   it("renders play button", () => {
@@ -99,14 +98,5 @@ describe("VideoPlayer", () => {
 
     fireEvent.pointerMove(slider, { clientX: 60 });
     expect(screen.getByText("0:30")).toBeInTheDocument();
-  });
-
-  it("shows a load error when the browser rejects the video", () => {
-    render(<VideoPlayer {...defaultProps} videoUrl="/stream" />);
-    const video = document.querySelector("video");
-    expect(video).toBeInTheDocument();
-
-    fireEvent.error(video as HTMLVideoElement);
-    expect(screen.getByText(/could not be loaded/i)).toBeInTheDocument();
   });
 });

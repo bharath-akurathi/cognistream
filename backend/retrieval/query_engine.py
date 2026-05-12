@@ -39,6 +39,7 @@ from backend.config import (
     RETRIEVAL_WEIGHT_AUDIO,
     RETRIEVAL_WEIGHT_TEXT,
     RETRIEVAL_WEIGHT_VISUAL,
+    SIGLIP_ENABLED,
 )
 from backend.db.chroma_store import ChromaStore
 from backend.db.models import SearchResult
@@ -85,13 +86,11 @@ class QueryEngine:
         self,
         embedder: MultimodalEmbedder | None = None,
         store: ChromaStore | None = None,
-        db=None,
         temporal_window: float = _TEMPORAL_WINDOW,
         temporal_weight: float = _TEMPORAL_WEIGHT,
     ):
         self.embedder = embedder or MultimodalEmbedder()
         self.store = store or ChromaStore()
-        self.db = db  # SQLiteDB — used for FTS5 transcript search
         self.temporal_window = temporal_window
         self.temporal_weight = temporal_weight
 
@@ -105,9 +104,6 @@ class QueryEngine:
         top_k: int = DEFAULT_TOP_K,
         video_id: Optional[str] = None,
         source_filter: Optional[str] = None,
-        search_mode: str = "hybrid",
-        agentic: bool = False,
-        min_score: float = 0.0,
     ) -> list[SearchResult]:
         """Execute the full search pipeline.
 
@@ -117,10 +113,6 @@ class QueryEngine:
             video_id:      Scope search to one video (optional).
             source_filter: Restrict to a source type: "visual", "audio",
                            "fused", or "event" (optional).
-            agentic:       If True, run query decomposition + VLM reflection rerank
-                           (VSS 3 agentic search). Slower but better for compound queries.
-            min_score:     Minimum score threshold. Results below this are
-                           filtered out (returns empty instead of garbage).
 
         Returns:
             Up to *top_k* :class:`SearchResult` objects sorted by
@@ -129,57 +121,6 @@ class QueryEngine:
         if not query.strip():
             logger.warning("Empty query — returning no results.")
             return []
-
-        # Quoted-phrase detection: "..." or \u201c...\u201d → FTS5 verbatim.
-        # Borrowed from Moment Search's quoted-phrase exact-match routing.
-        stripped = query.strip()
-        quoted_match = re.match(r'^["\u201c](.+)["\u201d]$', stripped)
-        if quoted_match and self.db:
-            phrase = quoted_match.group(1)
-            logger.info("Quoted phrase search: '%s'", phrase)
-            speech_hits = self.db.search_transcripts(phrase, video_id=video_id, limit=top_k)
-            results = [
-                SearchResult(
-                    video_id=h["video_id"],
-                    segment_id=f"speech-{h['video_id']}-{h['start_time']:.1f}",
-                    start_time=h["start_time"],
-                    end_time=h["end_time"],
-                    text=h["text"],
-                    source_type="speech",
-                    score=min(0.95, 0.7 + h["score"] * 0.05),
-                    speech_snippet=h.get("snippet"),
-                )
-                for h in speech_hits
-            ]
-            if min_score > 0:
-                results = [r for r in results if r.score >= min_score]
-            logger.info("Quoted phrase returned %d results.", len(results))
-            return results
-
-        # Speech-only mode: skip vector search entirely, use FTS5 only.
-        if search_mode == "speech" and self.db:
-            logger.info("Speech-only search: '%s'", query)
-            speech_hits = self.db.search_transcripts(query, video_id=video_id, limit=top_k)
-            results = [
-                SearchResult(
-                    video_id=h["video_id"],
-                    segment_id=f"speech-{h['video_id']}-{h['start_time']:.1f}",
-                    start_time=h["start_time"],
-                    end_time=h["end_time"],
-                    text=h["text"],
-                    source_type="speech",
-                    score=min(0.95, 0.7 + h["score"] * 0.05),
-                    speech_snippet=h.get("snippet"),
-                )
-                for h in speech_hits
-            ]
-            if min_score > 0:
-                results = [r for r in results if r.score >= min_score]
-            return results
-
-        # Agentic mode: decompose, search each sub-query, fuse, then rerank with VLM
-        if agentic:
-            return self.search_agentic(query, top_k, video_id, source_filter)
 
         # Stage 1: embed the query (text embedding)
         logger.info("Search query: '%s'", query)
@@ -231,7 +172,8 @@ class QueryEngine:
         # Stage 2b: visual embedding search (SigLIP/NVCLIP)
         # Search with the visual embedding of the query text to find
         # matching frames that were embedded with SigLIP/NVCLIP.
-        if RETRIEVAL_WEIGHT_VISUAL > 0:
+        # Skip if SigLIP is disabled (to avoid dimension mismatch).
+        if RETRIEVAL_WEIGHT_VISUAL > 0 and SIGLIP_ENABLED:
             visual_results = self._visual_search(query, fetch_k, video_id)
             if visual_results:
                 raw_results = self._merge_multi_vector(
@@ -251,24 +193,7 @@ class QueryEngine:
         # Stage 3b: hybrid reranking for better query differentiation
         reranked = self._hybrid_rerank(reranked, query)
 
-        # Stage 4: FTS5 speech search — merge transcript hits into the
-        # candidate pool so speech-matching segments get promoted.
-        # Skipped in visual-only mode.
-        if search_mode != "visual":
-            reranked = self._merge_speech_results(reranked, query, video_id)
-
-        # Stage 5: per-video diversification — prevent caption-rich videos
-        # from monopolising results when multiple videos match.
-        reranked = self._diversify(reranked, top_k)
-
-        # Stage 6: min-score threshold — return empty instead of noise
-        if min_score > 0:
-            reranked = [c for c in reranked if c.get("score", 0) >= min_score]
-
-        # Stage 7: collapse adjacent same-video frames into moments
-        reranked = self._collapse_moments(reranked)
-
-        # Stage 8: format and trim to top_k
+        # Stage 4: format and trim to top_k
         results = self._format(reranked[:top_k])
 
         logger.info(
@@ -281,181 +206,6 @@ class QueryEngine:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Stage 2b: Multi-vector visual search
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # Agentic search (VSS 3): decompose → multi-search → fuse → VLM rerank
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def search_agentic(
-        self,
-        query: str,
-        top_k: int = DEFAULT_TOP_K,
-        video_id: Optional[str] = None,
-        source_filter: Optional[str] = None,
-    ) -> list[SearchResult]:
-        """Agentic search: query decomposition + multi-vector + VLM reflection rerank.
-
-        Borrowed from NVIDIA Metropolis VSS 3.
-        """
-        logger.info("Agentic search: '%s'", query)
-
-        # Step 1: Decompose the query into sub-queries
-        sub_queries = self._decompose_query(query)
-        logger.info("Decomposed into %d sub-queries: %s", len(sub_queries), sub_queries)
-
-        # Step 2: Search each sub-query and collect results
-        all_results: dict[str, dict] = {}  # segment_id → result with merged score
-        for sub_q in sub_queries:
-            try:
-                emb = self.embedder.embed_query(sub_q)
-                fetch_k = min(top_k * _OVERFETCH_FACTOR, top_k + 20)
-                sub_results = self.store.query(
-                    embedding=emb,
-                    top_k=fetch_k,
-                    video_id=video_id,
-                    source_filter=source_filter,
-                )
-                # Merge into the global result set, keeping the max score per segment
-                for r in sub_results:
-                    rid = r["id"]
-                    if rid not in all_results or r["score"] > all_results[rid]["score"]:
-                        all_results[rid] = r
-            except Exception as exc:
-                logger.warning("Sub-query '%s' failed: %s", sub_q, exc)
-
-        if not all_results:
-            return []
-
-        # Step 3: Visual search fusion (if visual embeddings exist)
-        if RETRIEVAL_WEIGHT_VISUAL > 0:
-            visual_results = self._visual_search(query, top_k * 2, video_id)
-            if visual_results:
-                merged_list = self._merge_multi_vector(
-                    list(all_results.values()), visual_results,
-                    RETRIEVAL_WEIGHT_TEXT, RETRIEVAL_WEIGHT_VISUAL,
-                )
-                all_results = {r["id"]: r for r in merged_list}
-
-        # Step 4: Temporal re-ranking
-        candidates = list(all_results.values())
-        candidates.sort(key=lambda c: c["score"], reverse=True)
-        candidates = candidates[: top_k * 2]
-        candidates = self._temporal_rerank(candidates)
-
-        # Step 5: VLM reflection rerank (top candidates only — expensive)
-        candidates = self._vlm_reflect_rerank(query, candidates[: top_k * 2])
-
-        # Step 6: Format
-        return self._format(candidates[:top_k])
-
-    def _decompose_query(self, query: str) -> list[str]:
-        """Use an LLM to break a compound query into sub-queries.
-
-        Falls back to simple keyword splitting if no LLM is available.
-        """
-        # Try NVIDIA cloud LLM first
-        try:
-            from backend.providers.nvidia import nvidia
-            if nvidia.available:
-                from backend.config import NVIDIA_API_KEY, NVIDIA_BASE_URL
-                import httpx
-                with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
-                    resp = client.post(
-                        f"{NVIDIA_BASE_URL}/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": "meta/llama-3.2-11b-vision-instruct",
-                            "messages": [
-                                {
-                                    "role": "system",
-                                    "content": (
-                                        "You decompose video search queries into 1-4 simpler sub-queries. "
-                                        "Return only the sub-queries, one per line, no numbering or explanation. "
-                                        "If the query is already simple, return it as-is."
-                                    ),
-                                },
-                                {"role": "user", "content": f"Query: {query}\n\nSub-queries:"},
-                            ],
-                            "max_tokens": 200,
-                            "temperature": 0.2,
-                        },
-                    )
-                    if resp.status_code == 200:
-                        text = resp.json()["choices"][0]["message"]["content"]
-                        subs = [
-                            line.strip().lstrip("-•0123456789. ")
-                            for line in text.split("\n")
-                            if line.strip() and len(line.strip()) > 3
-                        ]
-                        if subs:
-                            return subs[:4]
-        except Exception as exc:
-            logger.debug("LLM decomposition failed: %s", exc)
-
-        # Fallback: split on common conjunctions
-        import re
-        parts = re.split(
-            r"\s+(?:and|then|after|before|while|when)\s+",
-            query, flags=re.IGNORECASE,
-        )
-        parts = [p.strip() for p in parts if p.strip()]
-        return parts if len(parts) > 1 else [query]
-
-    def _vlm_reflect_rerank(
-        self, query: str, candidates: list[dict],
-    ) -> list[dict]:
-        """Use a VLM to verify each top candidate matches the query.
-
-        Adjusts scores based on VLM verdict. Skipped if no frame_path on the
-        candidate or no VLM available.
-        """
-        if not candidates:
-            return candidates
-
-        # Use NVIDIA cloud VLM for reflection (fast + accurate)
-        try:
-            from backend.providers.nvidia import nvidia
-            if not nvidia.available:
-                return candidates  # Skip reflection if no VLM
-        except ImportError:
-            return candidates
-
-        from backend.providers.nvidia import nvidia as _nv
-
-        # Only rerank candidates that have a frame_path
-        rerank_count = min(5, len(candidates))  # Top 5 only — VLM calls are expensive
-        for i in range(rerank_count):
-            c = candidates[i]
-            frame = c.get("frame_path")
-            if not frame:
-                continue
-
-            try:
-                prompt = (
-                    f"Does this image match the search query: '{query}'? "
-                    "Answer with a single word: yes, no, or maybe."
-                )
-                answer = _nv.caption_image(frame, prompt) or ""
-                answer = answer.strip().lower()
-
-                # Boost or penalize the score
-                if answer.startswith("yes"):
-                    c["score"] = min(1.0, c["score"] * 1.2)
-                    c["_reflection"] = "yes"
-                elif answer.startswith("no"):
-                    c["score"] = c["score"] * 0.5
-                    c["_reflection"] = "no"
-                else:
-                    c["_reflection"] = "maybe"
-            except Exception as exc:
-                logger.debug("VLM reflection failed for candidate %d: %s", i, exc)
-
-        # Re-sort after reflection adjustments
-        candidates.sort(key=lambda c: c["score"], reverse=True)
-        return candidates
 
     def _visual_search(
         self, query: str, top_k: int, video_id: Optional[str]
@@ -474,40 +224,24 @@ class QueryEngine:
 
         # Fall back to local SigLIP
         if visual_embedding is None:
-            siglip = None
             try:
                 from backend.visual.siglip_embedder import SigLIPEmbedder
                 siglip = SigLIPEmbedder()
                 if siglip.enabled:
                     visual_embedding = siglip.embed_text(query)
-            except Exception as exc:
-                logger.debug("Visual query embedding failed: %s", exc)
-            finally:
-                if siglip is not None:
                     siglip.unload()
+            except Exception:
+                pass
 
         if visual_embedding is None:
             return []
 
-        try:
-            return self.store.query(
-                embedding=visual_embedding,
-                top_k=top_k,
-                video_id=video_id,
-                source_filter="visual",
-            )
-        except Exception as exc:
-            if not self._is_dimension_mismatch(exc):
-                raise
-
-            expected_dim, got_dim = self._parse_dims(str(exc))
-            logger.warning(
-                "Skipping visual vector search because the active ChromaDB collection "
-                "expects %s-dim embeddings but the visual query produced %s-dim.",
-                expected_dim,
-                got_dim,
-            )
-            return []
+        return self.store.query(
+            embedding=visual_embedding,
+            top_k=top_k,
+            video_id=video_id,
+            source_filter="visual",
+        )
 
     @staticmethod
     def _merge_multi_vector(
@@ -543,187 +277,6 @@ class QueryEngine:
 
         results = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
         return results
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # Stage 4: FTS5 speech search merge
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _merge_speech_results(
-        self, candidates: list[dict], query: str, video_id: str | None,
-    ) -> list[dict]:
-        """Merge FTS5 transcript hits into the candidate pool.
-
-        Speech matches that overlap a vector-search candidate get their
-        score boosted. Speech matches with no overlap are injected as
-        new candidates (source_type='speech'). This enables queries like
-        `"rules"` to surface transcript moments that SigLIP/NVCLIP can't.
-        """
-        if not self.db:
-            return candidates
-        try:
-            speech_hits = self.db.search_transcripts(query, video_id=video_id, limit=20)
-        except Exception:
-            return candidates
-        if not speech_hits:
-            return candidates
-
-        # Index existing candidates by (video_id, time_bucket) for overlap detection
-        _BUCKET = 3.0  # seconds — speech hit within this of a vector hit is a match
-        by_key: dict[tuple, dict] = {}
-        for c in candidates:
-            key = (c.get("video_id", ""), round(c.get("start_time", 0) / _BUCKET))
-            if key not in by_key or c.get("score", 0) > by_key[key].get("score", 0):
-                by_key[key] = c
-
-        injected = 0
-        for sh in speech_hits:
-            key = (sh["video_id"], round(sh["start_time"] / _BUCKET))
-            existing = by_key.get(key)
-            if existing:
-                # Boost: speech evidence strengthens the vector candidate
-                boost = min(0.15, sh["score"] * 0.02)
-                existing["score"] = existing.get("score", 0) + boost
-                existing["_speech_snippet"] = sh.get("snippet", "")
-            else:
-                # Inject new candidate from speech-only match.
-                # Score must be competitive with visual results (~0.5-0.7
-                # range) so it doesn't get buried under top-K truncation.
-                candidates.append({
-                    "id": f"speech-{sh['video_id']}-{sh['start_time']:.1f}",
-                    "video_id": sh["video_id"],
-                    "start_time": sh["start_time"],
-                    "end_time": sh["end_time"],
-                    "text": sh["text"],
-                    "source_type": "speech",
-                    "score": min(0.85, 0.6 + sh["score"] * 0.05),
-                    "frame_path": None,
-                    "_speech_snippet": sh.get("snippet", ""),
-                })
-                injected += 1
-
-        if injected:
-            candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
-            logger.info("Speech search injected %d new candidates.", injected)
-
-        return candidates
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # Stage 5: Per-video diversification
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    @staticmethod
-    def _diversify(candidates: list[dict], top_k: int) -> list[dict]:
-        """Ensure multiple matching videos appear in top-K results.
-
-        Without this, a video with many text-rich segments (e.g. one with
-        VLM captions) dominates over a video whose segments match
-        only via visual embeddings. This was the cause of lecture_clip
-        never appearing in results against cooking_demo.
-
-        Algorithm: round-robin across videos for the first top_k slots,
-        ordered by each video's best score. Then fill remaining slots
-        in pure score order.
-        """
-        if len(candidates) <= top_k:
-            return candidates
-
-        # Group by video_id, preserving score order within each group
-        from collections import defaultdict
-        by_video: dict[str, list[dict]] = defaultdict(list)
-        for c in candidates:
-            by_video[c.get("video_id", "")].append(c)
-
-        if len(by_video) <= 1:
-            return candidates  # single video, nothing to diversify
-
-        # Sort videos by their best candidate's score
-        video_order = sorted(
-            by_video.keys(),
-            key=lambda vid: by_video[vid][0].get("score", 0),
-            reverse=True,
-        )
-
-        # Round-robin: pick 1 from each video in order, repeat until top_k
-        diversified: list[dict] = []
-        seen_ids: set[str] = set()
-        pointers = {vid: 0 for vid in video_order}
-
-        while len(diversified) < top_k:
-            added_this_round = False
-            for vid in video_order:
-                if len(diversified) >= top_k:
-                    break
-                idx = pointers[vid]
-                if idx < len(by_video[vid]):
-                    c = by_video[vid][idx]
-                    cid = c.get("id", str(id(c)))
-                    if cid not in seen_ids:
-                        diversified.append(c)
-                        seen_ids.add(cid)
-                        added_this_round = True
-                    pointers[vid] = idx + 1
-            if not added_this_round:
-                break
-
-        return diversified
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # Stage 7: Collapse adjacent frames into moments
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    @staticmethod
-    def _collapse_moments(
-        candidates: list[dict], gap_sec: float = 5.0,
-    ) -> list[dict]:
-        """Merge adjacent same-video results into single 'moment' entries.
-
-        When three frames at t=11, t=13, t=14 all match, return one result
-        spanning [11, 14] with the best score, instead of three separate
-        entries that clutter the top-K. Inspired by Moment Search's
-        `collapseSearchResults` + `assignProximityGroups` pattern.
-        """
-        if not candidates:
-            return candidates
-
-        from collections import defaultdict
-        by_video: dict[str, list[dict]] = defaultdict(list)
-        non_video: list[dict] = []
-        for c in candidates:
-            vid = c.get("video_id")
-            if vid:
-                by_video[vid].append(c)
-            else:
-                non_video.append(c)
-
-        collapsed: list[dict] = list(non_video)
-
-        for vid, frames in by_video.items():
-            frames.sort(key=lambda f: f.get("start_time", 0))
-            buckets: list[list[dict]] = [[frames[0]]]
-            for f in frames[1:]:
-                prev_end = buckets[-1][-1].get("end_time", buckets[-1][-1].get("start_time", 0))
-                cur_start = f.get("start_time", 0)
-                if cur_start - prev_end <= gap_sec:
-                    buckets[-1].append(f)
-                else:
-                    buckets.append([f])
-
-            for bucket in buckets:
-                best = max(bucket, key=lambda f: f.get("score", 0))
-                if len(bucket) > 1:
-                    best = dict(best)
-                    best["start_time"] = bucket[0].get("start_time", 0)
-                    best["end_time"] = bucket[-1].get("end_time", bucket[-1].get("start_time", 0))
-                    best["_related_count"] = len(bucket) - 1
-                    # Preserve speech snippet from any merged entry
-                    for b in bucket:
-                        if b.get("_speech_snippet") and not best.get("_speech_snippet"):
-                            best["_speech_snippet"] = b["_speech_snippet"]
-                            break
-                collapsed.append(best)
-
-        collapsed.sort(key=lambda c: c.get("score", 0), reverse=True)
-        return collapsed
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Stage 3: Temporal re-ranking
@@ -874,8 +427,6 @@ class QueryEngine:
                     score=c.get("score", 0.0),
                     event_type=c.get("event_type"),
                     frame_url=frame_url,
-                    speech_snippet=c.get("_speech_snippet"),
-                    related_count=c.get("_related_count", 0),
                 )
             )
 

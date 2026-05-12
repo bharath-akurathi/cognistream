@@ -22,23 +22,17 @@ data/audio/
 data/frames/
 data/graphs/
 data/db/
-data/alerts/
-data/logs/
 
-# Model files / weights (large binaries)
+presentables
+
+# Model files / weights
 *.bin
 *.pt
 *.pth
 *.onnx
+*.safetensors
 *.gguf
-
-# Allow our fine-tuned models in the repo so they work on any device
-# cognistream-embedder: 88 MB (all-MiniLM-L6-v2 fine-tuned on video queries)
-# cognistream-moondream-lora: 52 MB (moondream LoRA adapter from Colab training)
-!models/cognistream-embedder/
-!models/cognistream-embedder/**
-!models/cognistream-moondream-lora/
-!models/cognistream-moondream-lora/**
+models/
 
 # IDE / Editor
 .idea/
@@ -83,7 +77,7 @@ cogni/
 *.temp
 *.bak
 *.swp
-reports/
+# reports/
 
 # NVIDIA / Secrets
 .nvidia-api-key
@@ -99,11 +93,3 @@ branch2/
 
 # Claude Code settings
 .claude/
-
-# Fine-tuning data, checkpoints, and model weights
-data/finetune/
-checkpoints/
-*.gguf
-
-# Test videos (downloaded by scripts/download_test_videos.py)
-data/test_videos/

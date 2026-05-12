@@ -1,0 +1,67 @@
+[
+  {
+    "timestamp": "2026-04-07T21:04:23.181483",
+    "base_url": "http://127.0.0.1:8000",
+    "video_id": "60dfe41cdaca41ca8d51d29f75beecbc",
+    "queries": 7,
+    "query_results": [
+      {
+        "query": "person",
+        "num_results": 10,
+        "latency_ms": 13682.6,
+        "avg_score": 0.492,
+        "top_score": 0.537
+      },
+      {
+        "query": "car",
+        "num_results": 10,
+        "latency_ms": 32.2,
+        "avg_score": 0.513,
+        "top_score": 0.537
+      },
+      {
+        "query": "movement",
+        "num_results": 10,
+        "latency_ms": 19.9,
+        "avg_score": 0.509,
+        "top_score": 0.549
+      },
+      {
+        "query": "data structures",
+        "num_results": 10,
+        "latency_ms": 68.9,
+        "avg_score": 0.647,
+        "top_score": 0.905
+      },
+      {
+        "query": "coding",
+        "num_results": 10,
+        "latency_ms": 22.0,
+        "avg_score": 0.59,
+        "top_score": 0.615
+      },
+      {
+        "query": "algorithm",
+        "num_results": 10,
+        "latency_ms": 22.6,
+        "avg_score": 0.603,
+        "top_score": 0.832
+      },
+      {
+        "query": "graph",
+        "num_results": 10,
+        "latency_ms": 19.2,
+        "avg_score": 0.554,
+        "top_score": 0.77
+      }
+    ],
+    "aggregate": {
+      "avg_latency_ms": 1981.1,
+      "p50_latency_ms": 22.6,
+      "p95_latency_ms": 68.9,
+      "avg_score": 0.558,
+      "score_stdev": 0.082,
+      "jaccard_diversity": 0.0
+    }
+  }
+]

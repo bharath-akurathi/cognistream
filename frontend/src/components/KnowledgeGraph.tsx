@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getVideoGraph } from "../api/client";
-import KnowledgeGraph3D from "./KnowledgeGraph3D";
 import type { GraphData, GraphEdge, GraphNode } from "../types";
 
 interface KnowledgeGraphProps {
@@ -42,12 +41,6 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [canvasSize, setCanvasSize] = useState<CanvasSize>(DEFAULT_CANVAS);
   const [isDragging, setIsDragging] = useState(false);
-  const [is3DMode, setIs3DMode] = useState(false);
-    const [zoom, setZoom] = useState(1);
-    const [panX, setPanX] = useState(0);
-    const [panY, setPanY] = useState(0);
-    const [isPanning, setIsPanning] = useState(false);
-    const panStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -147,19 +140,6 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
     canvas.style.width = `${canvasSize.width}px`;
     canvas.style.height = `${canvasSize.height}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.translate(panX, panY);
-  ctx.scale(zoom, zoom);
-
-    // Performance: stop the animation when the layout converges. Without this
-    // we burn 60 fps × O(N^2) force calculations forever, which is what makes
-    // the graph feel slow on local — for 100+ nodes this blocks the main
-    // thread continuously.
-    let stableFrames = 0;
-    const STABLE_THRESHOLD = 30;       // ~0.5 s of low motion
-    const ENERGY_THRESHOLD = 0.05;     // total KE below this = "stable"
-    // For very large graphs, skip the O(N^2) repulsion entirely. Spring
-    // forces alone produce a usable layout above ~150 nodes.
-    const SKIP_REPULSION_ABOVE = 150;
 
     const tick = () => {
       const width = canvasSize.width;
@@ -176,7 +156,7 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
         }
       }
 
-      if (nodes.length > 1 && nodes.length <= SKIP_REPULSION_ABOVE) {
+      if (nodes.length > 1) {
         for (let i = 0; i < nodes.length; i += 1) {
           for (let j = i + 1; j < nodes.length; j += 1) {
             const a = nodes[i];
@@ -218,14 +198,12 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
         node.vy += (height / 2 - node.y) * 0.0012;
       }
 
-      let totalEnergy = 0;
       for (const node of nodes) {
         if (dragRef.current?.nodeId === node.id) continue;
         node.vx *= 0.84;
         node.vy *= 0.84;
         node.x = clamp(node.x + node.vx, 28, width - 28);
         node.y = clamp(node.y + node.vy, 28, height - 28);
-        totalEnergy += node.vx * node.vx + node.vy * node.vy;
       }
 
       ctx.clearRect(0, 0, width, height);
@@ -262,22 +240,12 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
         drawNode(ctx, node, hoveredNodeId === node.id, selectedNodeId === node.id, connectedNodeIds.has(node.id));
       }
 
-      // Stop the animation once the layout has converged. Drag / hover /
-      // resize re-trigger this useEffect and restart the loop from scratch,
-      // so the layout always settles after user interaction.
-      if (totalEnergy < ENERGY_THRESHOLD && !dragRef.current) {
-        stableFrames += 1;
-      } else {
-        stableFrames = 0;
-      }
-      if (stableFrames < STABLE_THRESHOLD) {
-        animRef.current = requestAnimationFrame(tick);
-      }
+      animRef.current = requestAnimationFrame(tick);
     };
 
     animRef.current = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animRef.current);
-  }, [canvasSize, graph, hoveredNodeId, selectedNodeId, panX, panY, zoom]);
+  }, [canvasSize, graph, hoveredNodeId, selectedNodeId]);
 
   const activeNode = useMemo(
     () => graph?.nodes.find((node) => node.id === selectedNodeId) ?? null,
@@ -317,11 +285,11 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
       const scaleX = canvasSize.width / rect.width;
       const scaleY = canvasSize.height / rect.height;
       return {
-          x: ((clientX - rect.left) * scaleX - panX) / zoom,
-          y: ((clientY - rect.top) * scaleY - panY) / zoom,
+        x: (clientX - rect.left) * scaleX,
+        y: (clientY - rect.top) * scaleY,
       };
     },
-      [canvasSize, zoom, panX, panY]
+    [canvasSize]
   );
 
   const findNodeAtPoint = useCallback((x: number, y: number) => {
@@ -341,14 +309,6 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
       const point = getCanvasPoint(event.clientX, event.clientY);
       if (!point) return;
 
-      if (isPanning && panStartRef.current) {
-        const deltaX = event.clientX - panStartRef.current.x;
-        const deltaY = event.clientY - panStartRef.current.y;
-        setPanX((prev) => prev + deltaX);
-        setPanY((prev) => prev + deltaY);
-        panStartRef.current = { x: event.clientX, y: event.clientY };
-        return;
-      }
       if (dragRef.current) {
         const dragged = nodesRef.current.find((node) => node.id === dragRef.current?.nodeId);
         if (dragged) {
@@ -364,18 +324,13 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
       const hit = findNodeAtPoint(point.x, point.y);
       setHoveredNodeId((prev) => (prev === hit?.id ? prev : hit?.id ?? null));
     },
-    [canvasSize, findNodeAtPoint, getCanvasPoint, isPanning]
+    [canvasSize, findNodeAtPoint, getCanvasPoint]
   );
 
   const handleMouseDown = useCallback(
     (event: React.MouseEvent<HTMLCanvasElement>) => {
       const point = getCanvasPoint(event.clientX, event.clientY);
       if (!point) return;
-
-      if (isPanning) {
-        panStartRef.current = { x: event.clientX, y: event.clientY };
-        return;
-      }
 
       const hit = findNodeAtPoint(point.x, point.y);
       if (!hit) {
@@ -393,43 +348,13 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
       };
       setIsDragging(true);
     },
-    [findNodeAtPoint, getCanvasPoint, isPanning]
+    [findNodeAtPoint, getCanvasPoint]
   );
 
   const releaseDrag = useCallback(() => {
     dragRef.current = null;
     setIsDragging(false);
-    panStartRef.current = null;
   }, []);
-
-  const handleWheel = useCallback((event: React.WheelEvent<HTMLCanvasElement>) => {
-    event.preventDefault();
-    setZoom((prev) => clamp(prev - event.deltaY * 0.001, 0.5, 3));
-  }, []);
-
-  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLCanvasElement>) => {
-    if (event.code === "Space") {
-      event.preventDefault();
-      setIsPanning(true);
-    }
-  }, []);
-
-  const handleKeyUp = useCallback((event: React.KeyboardEvent<HTMLCanvasElement>) => {
-    if (event.code === "Space") {
-      event.preventDefault();
-      setIsPanning(false);
-      panStartRef.current = null;
-    }
-  }, []);
-
-  const resetView = useCallback(() => {
-    setZoom(1);
-    setPanX(0);
-    setPanY(0);
-  }, []);
-
-  const zoomIn = useCallback(() => setZoom((z) => Math.min(3, z + 0.2)), []);
-  const zoomOut = useCallback(() => setZoom((z) => Math.max(0.5, z - 0.2)), []);
 
   if (loading) return <div style={styles.loading}>Loading graph...</div>;
   if (!graph || graph.nodes.length === 0) {
@@ -463,88 +388,18 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
           ))}
         </div>
 
-        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          <button
-            onClick={() => setIs3DMode(!is3DMode)}
-            style={styles.toggleButton}
-            title="Toggle 2D/3D view"
-            aria-pressed={is3DMode}
-          >
-            <span
-              style={{
-                ...styles.toggleTrack,
-                background: is3DMode
-                  ? "linear-gradient(135deg, #0f172a 0%, #1e293b 55%, #111827 100%)"
-                  : "linear-gradient(135deg, #e2e8f0 0%, #bae6fd 55%, #f8fafc 100%)",
-              }}
-            >
-              <span
-                style={{
-                  ...styles.toggleSideLabel,
-                  left: 12,
-                  color: is3DMode ? "rgba(226, 232, 240, 0.7)" : "rgba(15, 23, 42, 0.7)",
-                }}
-              >
-                2D
-              </span>
-              <span
-                style={{
-                  ...styles.toggleSideLabel,
-                  right: 12,
-                  color: is3DMode ? "rgba(226, 232, 240, 0.7)" : "rgba(15, 23, 42, 0.7)",
-                }}
-              >
-                3D
-              </span>
-              <span
-                style={{
-                  ...styles.toggleThumb,
-                  transform: is3DMode ? "translateX(54px)" : "translateX(0)",
-                  background: is3DMode ? "#e2e8f0" : "#38bdf8",
-                  boxShadow: is3DMode
-                    ? "0 8px 16px rgba(15, 23, 42, 0.35)"
-                    : "0 8px 16px rgba(14, 116, 144, 0.35)",
-                }}
-              >
-                <span style={styles.toggleThumbLabel}>{is3DMode ? "3D" : "2D"}</span>
-              </span>
-            </span>
-          </button>
-          <button onClick={onClose} style={styles.closeBtn}>×</button>
-        </div>
+        <button onClick={onClose} style={styles.closeBtn}>×</button>
       </div>
 
       <div style={styles.content}>
-        {is3DMode ? (
-          <KnowledgeGraph3D
-            videoId={videoId}
-            onClose={() => setIs3DMode(false)}
-            selectedNodeId={selectedNodeId}
-            onNodeSelect={setSelectedNodeId}
-          />
-        ) : (
-          <>
         <div ref={canvasHostRef} style={styles.canvasPanel}>
-          <div style={styles.zoomControls}>
-            <button onClick={zoomOut} style={styles.zoomBtn} title="Zoom out">
-              -
-            </button>
-            <span style={styles.zoomLevel}>{Math.round(zoom * 100)}%</span>
-            <button onClick={zoomIn} style={styles.zoomBtn} title="Zoom in">
-              +
-            </button>
-            <button onClick={resetView} style={styles.zoomBtn} title="Reset view">
-              Reset
-            </button>
-          </div>
-
           <canvas
             ref={canvasRef}
             width={canvasSize.width}
             height={canvasSize.height}
             style={{
               ...styles.canvas,
-              cursor: isPanning ? "grabbing" : isDragging ? "grabbing" : hoveredNodeId ? "pointer" : "grab",
+              cursor: isDragging ? "grabbing" : hoveredNodeId ? "pointer" : "grab",
             }}
             onMouseMove={handleMouseMove}
             onMouseDown={handleMouseDown}
@@ -553,17 +408,12 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
               setHoveredNodeId(null);
               releaseDrag();
             }}
-            onWheel={handleWheel}
-            onKeyDown={handleKeyDown}
-            onKeyUp={handleKeyUp}
-            tabIndex={0}
           />
 
           <div style={styles.canvasHint}>
             {activeNode
               ? `Selected ${humanizeLabel(activeNode.label)}. Drag to rearrange, or click another entity to follow its relationships.`
               : "Click a node to inspect relationships. Drag nodes to untangle the graph."}
-            <div style={styles.zoomHint}>Scroll to zoom • Hold Space and drag to pan</div>
           </div>
         </div>
 
@@ -635,8 +485,6 @@ export default function KnowledgeGraph({ videoId, onClose }: KnowledgeGraphProps
             )}
           </div>
         </aside>
-          </>
-        )}
       </div>
     </div>
   );
@@ -863,54 +711,6 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 0,
     lineHeight: 1,
   },
-  toggleButton: {
-    background: "transparent",
-    border: "none",
-    padding: 0,
-    cursor: "pointer",
-  },
-  toggleTrack: {
-    position: "relative",
-    width: 112,
-    height: 44,
-    borderRadius: 999,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    boxShadow: "inset 0 1px 6px rgba(15, 23, 42, 0.25)",
-    border: "1px solid rgba(148, 163, 184, 0.35)",
-    transition: "background 200ms ease",
-  },
-  toggleThumb: {
-    position: "absolute",
-    top: 4,
-    left: 4,
-    width: 36,
-    height: 36,
-    borderRadius: 999,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 11,
-    fontWeight: 700,
-    color: "#0f172a",
-    transition: "transform 220ms ease, background 200ms ease, box-shadow 200ms ease",
-  },
-  toggleThumbLabel: {
-    fontSize: 12,
-    fontWeight: 800,
-    color: "#0f172a",
-  },
-  toggleSideLabel: {
-    position: "absolute",
-    top: 12,
-    fontSize: 12,
-    fontWeight: 800,
-    color: "rgba(15, 23, 42, 0.7)",
-    textTransform: "uppercase",
-    letterSpacing: "0.08em",
-    pointerEvents: "none",
-  },
   content: {
     display: "flex",
     gap: "16px",
@@ -933,44 +733,6 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: "10px",
     fontSize: "12px",
     color: "#64748b",
-  },
-  zoomHint: {
-    marginTop: "4px",
-    fontSize: "12px",
-    color: "#94a3b8",
-  },
-  zoomControls: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-    padding: "10px",
-    borderRadius: "8px",
-    border: "1px solid #dbe3f0",
-    background: "#ffffff",
-    marginBottom: "12px",
-    justifyContent: "center",
-  },
-  zoomBtn: {
-    background: "#ffffff",
-    border: "1px solid #cbd5e1",
-    borderRadius: "6px",
-    minWidth: "32px",
-    height: "32px",
-    fontSize: "14px",
-    fontWeight: 600,
-    color: "#334155",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "0 10px",
-  },
-  zoomLevel: {
-    fontSize: "12px",
-    fontWeight: 600,
-    color: "#475569",
-    minWidth: "40px",
-    textAlign: "center",
   },
   sidebar: {
     flex: "1 1 260px",

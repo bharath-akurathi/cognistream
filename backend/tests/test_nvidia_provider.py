@@ -285,18 +285,11 @@ class TestDetectObjects:
         assert result[0]["label"] == "car"
         assert result[0]["confidence"] == 0.85
 
-        # Verify the OpenAI-chat-style request shape (NIM format).
-        # Content must be a list with type='text' items only — image_url
-        # type is rejected by the cloud validator, so the image is embedded
-        # as an HTML <img> tag inside the text field.
+        # Verify the prompt format (period-separated)
         call_args = mock_client.post.call_args
         body = call_args[1]["json"]
-        assert body["model"] == "nvidia/nv-grounding-dino"
+        assert body["prompt"] == "car. person."
         assert body["threshold"] == 0.3
-        text_item = body["messages"][0]["content"][0]
-        assert text_item["type"] == "text"
-        assert text_item["text"].startswith("car. person.")
-        assert "<img" in text_item["text"]
 
     @patch("backend.providers.nvidia.is_nvidia_enabled", return_value=False)
     def test_returns_none_when_not_available(self, mock_enabled, provider, tiny_image):

@@ -36,7 +36,6 @@ from backend.config import (
     NVIDIA_GROUNDING_MODEL,
     NVIDIA_GROUNDING_URL,
     NVIDIA_VLM_MODEL,
-    EMBEDDING_DIM,
     is_nvidia_enabled,
 )
 
@@ -54,17 +53,6 @@ class NvidiaProvider:
 
     _FAILURE_THRESHOLD = 3
     _DISABLE_SECONDS = 300
-
-    def _adjust_dim(self, vec: list[float] | None) -> list[float] | None:
-        """Adjust embedding vector to configured EMBEDDING_DIM by truncation or zero-pad."""
-        if vec is None:
-            return None
-        desired = EMBEDDING_DIM if isinstance(EMBEDDING_DIM, int) else 384
-        if len(vec) == desired:
-            return vec
-        if len(vec) > desired:
-            return vec[:desired]
-        return vec + [0.0] * (desired - len(vec))
 
     @property
     def available(self) -> bool:
@@ -117,10 +105,7 @@ class NvidiaProvider:
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
-                # Short read timeout: if the cloud endpoint is hung or rate-
-                # limited, fail fast so the caller can fall back to YOLO
-                # rather than blocking the whole pipeline.
-                timeout=httpx.Timeout(8.0, connect=10.0),
+                timeout=httpx.Timeout(60.0, connect=10.0),
             )
         return self._grounding_client
 
@@ -156,7 +141,7 @@ class NvidiaProvider:
             resp.raise_for_status()
             data = resp.json()
             self._record_success()
-            return self._adjust_dim(data["data"][0]["embedding"])
+            return data["data"][0]["embedding"]
         except Exception as exc:
             self._record_failure(exc)
             logger.warning("NVCLIP image embed failed: %s", exc)
@@ -183,7 +168,7 @@ class NvidiaProvider:
             resp.raise_for_status()
             data = resp.json()
             self._record_success()
-            return [self._adjust_dim(item["embedding"]) for item in data["data"]]
+            return [item["embedding"] for item in data["data"]]
         except Exception as exc:
             self._record_failure(exc)
             logger.warning("NVCLIP batch image embed failed: %s", exc)
@@ -212,7 +197,7 @@ class NvidiaProvider:
             resp.raise_for_status()
             data = resp.json()
             self._record_success()
-            return self._adjust_dim(data["data"][0]["embedding"])
+            return data["data"][0]["embedding"]
         except Exception as exc:
             self._record_failure(exc)
             logger.warning("NV-Embed text embed failed: %s", exc)
@@ -238,7 +223,7 @@ class NvidiaProvider:
             resp.raise_for_status()
             data = resp.json()
             self._record_success()
-            return [self._adjust_dim(item["embedding"]) for item in data["data"]]
+            return [item["embedding"] for item in data["data"]]
         except Exception as exc:
             self._record_failure(exc)
             logger.warning("NV-Embed batch embed failed: %s", exc)
@@ -273,37 +258,16 @@ class NvidiaProvider:
             # Grounding DINO uses period-separated prompt
             prompt = ". ".join(labels) + "."
 
-            # Cloud NIM expects an OpenAI-chat-style body where content is a
-            # list of items, each item must have type='text' (image_url type
-            # is rejected by the validator). The text field is capped at
-            # 1024 chars so the image must be uploaded as an asset first
-            # and referenced via an HTML <img> tag inside the text. See:
-            # https://docs.api.nvidia.com/nim/reference/nvidia-nv-grounding-dino-infer
-            #
-            # NOTE: this path currently relies on the caller uploading an
-            # asset and replacing the prompt with one containing the
-            # `data:image/jpeg;asset_id,...` reference. For the inline path
-            # below, the cloud endpoint will reject calls with images larger
-            # than ~1KB of base64 (i.e. essentially everything). Local YOLO
-            # via cv_filter is the practical backend.
             resp = self._get_grounding_client().post(
                 NVIDIA_GROUNDING_URL,
                 json={
-                    "model": NVIDIA_GROUNDING_MODEL,
-                    "messages": [
+                    "input": [
                         {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": (
-                                        f'{prompt} '
-                                        f'<img src="data:image/jpeg;base64,{b64}" />'
-                                    ),
-                                }
-                            ],
+                            "type": "image_url",
+                            "url": f"data:image/jpeg;base64,{b64}",
                         }
                     ],
+                    "prompt": prompt,
                     "threshold": threshold,
                 },
             )

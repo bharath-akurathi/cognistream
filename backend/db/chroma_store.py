@@ -108,49 +108,9 @@ class ChromaStore:
             metadata={"hnsw:space": "cosine"},
         )
 
-        # Dimension-migration: detect and recover from embedding dim mismatch.
-        # If the stored vectors have a different dimension than the current
-        # embedding model produces, the collection is stale and must be
-        # recreated.  Borrowed from Moment Search's auto-migration pattern.
-        self._migrate_dimension_if_needed()
-
         count = self._collection.count()
         logger.info("ChromaDB ready: %d existing documents.", count)
         return self._collection
-
-    def _migrate_dimension_if_needed(self) -> None:
-        """Drop and recreate the collection if its vector dimension doesn't
-        match the current embedding model's output size."""
-        try:
-            from backend.config import EMBEDDING_DIM
-            expected_dim = EMBEDDING_DIM
-        except ImportError:
-            return  # can't check without knowing expected dim
-
-        if not expected_dim or expected_dim <= 0:
-            return
-
-        # Peek at one stored embedding to discover actual dimension
-        try:
-            peek = self._collection.peek(limit=1)
-            if not peek or not peek.get("embeddings") or not peek["embeddings"]:
-                return  # empty collection, nothing to migrate
-            stored_dim = len(peek["embeddings"][0])
-            if stored_dim == expected_dim:
-                return
-            logger.warning(
-                "ChromaDB dimension mismatch: collection has %d-dim vectors "
-                "but current embedder produces %d-dim. Recreating collection.",
-                stored_dim, expected_dim,
-            )
-            self._client.delete_collection(self._collection_name)
-            self._collection = self._client.get_or_create_collection(
-                name=self._collection_name,
-                metadata={"hnsw:space": "cosine"},
-            )
-            logger.info("ChromaDB collection recreated with expected %d-dim.", expected_dim)
-        except Exception as exc:
-            logger.debug("Dimension migration check failed: %s", exc)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Write operations
@@ -184,46 +144,40 @@ class ChromaStore:
             documents.append(seg.text)
             metadatas.append(self._segment_metadata(seg))
 
+        # Validate all embeddings have the same dimension
+        if embeddings:
+            dimensions = set(len(e) for e in embeddings)
+            if len(dimensions) > 1:
+                dim_counts = {}
+                for e in embeddings:
+                    dim = len(e)
+                    dim_counts[dim] = dim_counts.get(dim, 0) + 1
+                logger.error(
+                    "Embedding dimension mismatch detected! Found %d different dimensions: %s. "
+                    "This usually means SigLIP (768-dim) is being mixed with text embeddings (384-dim). "
+                    "Fix: Set SIGLIP_MODEL='' in .env to disable SigLIP, or use separate collections.",
+                    len(dimensions),
+                    dim_counts,
+                )
+                raise ValueError(
+                    f"Inconsistent embedding dimensions: {dim_counts}. "
+                    "See logs for troubleshooting. Likely SigLIP + text embedding mismatch."
+                )
+
         if not ids:
             logger.warning("No valid segments to store.")
             return 0
 
-        # Upsert in chunks of 500 (ChromaDB batch limit).
-        # On dimension mismatch, recreate the collection and retry once.
+        # Upsert in chunks of 500 (ChromaDB batch limit)
         stored = 0
-        retried = False
         for i in range(0, len(ids), 500):
             end = i + 500
-            try:
-                collection.upsert(
-                    ids=ids[i:end],
-                    embeddings=embeddings[i:end],
-                    documents=documents[i:end],
-                    metadatas=metadatas[i:end],
-                )
-            except Exception as exc:
-                if not retried and "dimension" in str(exc).lower():
-                    logger.warning(
-                        "ChromaDB dimension mismatch on upsert — recreating "
-                        "collection and retrying. Error: %s", exc,
-                    )
-                    self._client.delete_collection(self._collection_name)
-                    self._collection = self._client.get_or_create_collection(
-                        name=self._collection_name,
-                        metadata={"hnsw:space": "cosine"},
-                    )
-                    collection = self._collection
-                    retried = True
-                    # Restart from the beginning with the fresh collection
-                    stored = 0
-                    collection.upsert(
-                        ids=ids[:end],
-                        embeddings=embeddings[:end],
-                        documents=documents[:end],
-                        metadatas=metadatas[:end],
-                    )
-                else:
-                    raise
+            collection.upsert(
+                ids=ids[i:end],
+                embeddings=embeddings[i:end],
+                documents=documents[i:end],
+                metadatas=metadatas[i:end],
+            )
             stored += len(ids[i:end])
 
         logger.info(

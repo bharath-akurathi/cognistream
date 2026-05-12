@@ -9,7 +9,7 @@ python-dotenv==1.0.1
 
 # Video / audio processing
 opencv-python-headless==4.11.0.86
-numpy>=1.26
+numpy>=1.26,<2.0
 
 # Speech-to-text
 faster-whisper==1.1.1
@@ -35,10 +35,3 @@ networkx==3.4.2
 # ── Optional: NVIDIA NIM cloud support ──
 # Uncomment if using NVIDIA cloud models (requires API key)
 # nvidia-riva-client>=2.17.0  # Parakeet ASR (gRPC)
-
-# ── Optional: CV pre-filter (~30% faster pipeline) ──
-# YOLOv8n local object detection — drops keyframes with no interesting
-# objects before they reach the slow VLM. Auto-downloads ~6 MB weights
-# on first use. Note: pulls in numpy 2.x which conflicts with the pin
-# above; install in a separate venv if you need both.
-# ultralytics>=8.4.0

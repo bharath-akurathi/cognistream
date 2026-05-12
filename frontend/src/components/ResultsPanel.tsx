@@ -102,21 +102,12 @@ function ResultCard({
       </div>
 
       <div style={styles.cardCenter}>
-        {result.speech_snippet ? (
-          <p
-            style={styles.speechSnippet}
-            dangerouslySetInnerHTML={{ __html: result.speech_snippet }}
-          />
-        ) : (
-          <>
-            {caption && <p style={styles.captionText}>{caption}</p>}
-            {speech && (
-              <p style={styles.speechText}>
-                <span style={styles.speechLabel}>Speech: </span>
-                {speech}
-              </p>
-            )}
-          </>
+        {caption && <p style={styles.captionText}>{caption}</p>}
+        {speech && (
+          <p style={styles.speechText}>
+            <span style={styles.speechLabel}>Speech: </span>
+            {speech}
+          </p>
         )}
         {result.event_type && <span style={styles.eventBadge}>{result.event_type}</span>}
       </div>
@@ -131,9 +122,6 @@ function ResultCard({
           {result.source_type}
         </span>
         <span style={styles.score}>{Math.round(result.score * 100)}%</span>
-        {(result.related_count ?? 0) > 0 && (
-          <span style={styles.relatedBadge}>+{result.related_count} more</span>
-        )}
       </div>
     </button>
   );
@@ -167,8 +155,6 @@ function sourceBadgeColor(source: string): string {
       return "#ede9fe";
     case "audio":
       return "#d1fae5";
-    case "speech":
-      return "#fef3c7";
     case "event":
       return "#fee2e2";
     default:
@@ -318,19 +304,5 @@ const styles: Record<string, React.CSSProperties> = {
     borderTopColor: "#3b82f6",
     borderRadius: "50%",
     animation: "spin 0.6s linear infinite",
-  },
-  speechSnippet: {
-    fontSize: "14px",
-    color: "#334155",
-    lineHeight: 1.6,
-    margin: "0 0 4px 0",
-  },
-  relatedBadge: {
-    fontSize: "11px",
-    fontWeight: 600,
-    color: "#3b82f6",
-    background: "#eff6ff",
-    padding: "2px 8px",
-    borderRadius: "10px",
   },
 };

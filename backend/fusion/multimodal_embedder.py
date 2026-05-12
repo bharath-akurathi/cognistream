@@ -286,27 +286,7 @@ class MultimodalEmbedder:
 
         from sentence_transformers import SentenceTransformer
 
-        # Try ONNX backend for ~1.5-1.8x speedup (requires sentence-transformers[onnx-gpu])
-        backend = "default"
-        try:
-            import onnxruntime  # noqa: F401
-            backend = "onnx"
-            logger.info("ONNX Runtime available — using accelerated backend")
-        except ImportError:
-            pass
-
-        if backend == "onnx":
-            try:
-                self._model = SentenceTransformer(self._model_name, backend=backend)
-            except (ImportError, RuntimeError, ValueError) as exc:
-                logger.warning(
-                    "ONNX backend unavailable despite onnxruntime being installed; "
-                    "falling back to default SentenceTransformer backend: %s",
-                    exc,
-                )
-                self._model = SentenceTransformer(self._model_name)
-        else:
-            self._model = SentenceTransformer(self._model_name)
+        self._model = SentenceTransformer(self._model_name)
 
         logger.info(
             "SentenceTransformer loaded in %.1fs",

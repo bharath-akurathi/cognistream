@@ -92,24 +92,15 @@ class PromptLibrary:
     def combined_prompt() -> str:
         """Single-pass prompt that extracts all four fields at once.
 
-        Includes a concrete few-shot example so small VLMs follow the
-        format reliably.  The example is kept short to fit within
-        moondream's 2048-token context.
+        ~75% faster than four separate calls.  Designed for small VLMs
+        that can handle brief structured output.
         """
         return (
             "Analyze this image. Respond with EXACTLY this format:\n"
             "SCENE: [2-3 sentence description of setting and atmosphere]\n"
             "OBJECTS: [comma-separated list of visible objects]\n"
             "ACTIVITY: [one sentence describing what is happening]\n"
-            "ANOMALY: [anything unusual, or 'none']\n"
-            "\n"
-            "Example:\n"
-            "SCENE: A busy intersection at night with streetlights illuminating the road. Two lanes of traffic are visible.\n"
-            "OBJECTS: car, traffic light, crosswalk, street lamp, road sign\n"
-            "ACTIVITY: A red sedan is turning left at the intersection.\n"
-            "ANOMALY: none\n"
-            "\n"
-            "Now analyze the provided image:"
+            "ANOMALY: [anything unusual, or 'none']"
         )
 
 

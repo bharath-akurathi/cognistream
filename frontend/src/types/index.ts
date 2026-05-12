@@ -5,17 +5,14 @@ export interface SearchResult {
   start_time: number;
   end_time: number;
   text: string;
-  source_type: "visual" | "audio" | "fused" | "event" | "speech";
+  source_type: "visual" | "audio" | "fused" | "event";
   score: number;
   event_type?: string;
   frame_url?: string;
-  speech_snippet?: string;
-  related_count?: number;
 }
 
 export interface SearchResponse {
   query: string;
-  result_count: number;
   results: SearchResult[];
 }
 
@@ -36,16 +33,11 @@ export interface VideoListResponse {
   videos: VideoMeta[];
 }
 
-export type SearchMode = "hybrid" | "visual" | "speech";
-
 export interface SearchRequest {
   query: string;
   video_id?: string;
   top_k?: number;
   source_filter?: string;
-  search_mode?: SearchMode;
-  min_score?: number;
-  agentic?: boolean;
 }
 
 /** Knowledge graph types */

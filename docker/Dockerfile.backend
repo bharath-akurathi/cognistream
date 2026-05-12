@@ -1,105 +1,60 @@
 # ─────────────────────────────────────────────────────────
-# CogniStream — Backend (multi-stage, CPU-only)
+# CogniStream — Backend
 #
-# Stage 1 (builder): installs Python deps + downloads ML
-#   models into a venv. Forces CPU torch wheel — without
-#   this, sentence-transformers pulls 15 nvidia-cu12 packages
-#   (~6 GB of CUDA libs) that the container never uses.
-#
-# Stage 2 (runtime): slim image with ffmpeg + the venv +
-#   the backend code. No build toolchain.
-#
-# Result: ~14.6 GB → ~3 GB.
+# Slim Python image with system FFmpeg.
+# Pre-downloads ML models at build time so the container
+# runs fully offline with no network calls at runtime.
 # ─────────────────────────────────────────────────────────
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Stage 1: builder
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim AS base
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Isolated venv keeps the multi-stage copy clean and reproducible
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-ENV PIP_NO_CACHE_DIR=1
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# Pre-create model cache dirs and point HF / sentence-transformers at them
-# so the runtime stage can copy them as a single tree.
-ENV HF_HOME=/opt/models/huggingface
-ENV SENTENCE_TRANSFORMERS_HOME=/opt/models/sentence-transformers
-RUN mkdir -p "$HF_HOME" "$SENTENCE_TRANSFORMERS_HOME"
-
-# CPU-only torch FIRST. Once torch is satisfied, sentence-transformers
-# won't pull the default Linux wheel that bundles all of CUDA.
-RUN pip install \
-        --index-url https://download.pytorch.org/whl/cpu \
-        --extra-index-url https://pypi.org/simple \
-        torch torchvision
-
-WORKDIR /build
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-# Pre-download ML models during build so the container starts offline
-RUN python -c "from sentence_transformers import SentenceTransformer; \
-SentenceTransformer('all-MiniLM-L6-v2')"
-RUN python -c "from faster_whisper import WhisperModel; \
-WhisperModel('base', device='cpu', compute_type='int8')"
-RUN python -m spacy download en_core_web_sm
-
-# Cleanup: remove test directories and bytecode caches.
-# NOTE: do NOT delete *.dist-info — transformers/spacy use importlib.metadata
-# at runtime to verify dependency versions and will crash without them.
-RUN find /opt/venv -depth \
-        \( -type d -a \( -name __pycache__ -o -name tests -o -name test \) \) \
-        -exec rm -rf {} + 2>/dev/null || true && \
-    find /opt/venv -type f -name '*.pyc' -delete && \
-    find /opt/venv -type f -name '*.pyo' -delete
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Stage 2: runtime
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FROM python:3.11-slim AS runtime
-
+# ── System dependencies ────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libgl1 \
         libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-# Copy venv + pre-downloaded models from builder
-COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /opt/models /opt/models
-
-ENV PATH="/opt/venv/bin:$PATH"
-ENV HF_HOME=/opt/models/huggingface
-ENV SENTENCE_TRANSFORMERS_HOME=/opt/models/sentence-transformers
-ENV PIP_NO_CACHE_DIR=1
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# ── Python dependencies ────────────────────────────────
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ── Pre-download ML models for offline operation ───────
+# SentenceTransformer embedding model (~80 MB)
+RUN python -c "\
+from sentence_transformers import SentenceTransformer; \
+SentenceTransformer('all-MiniLM-L6-v2')"
+
+# Faster-Whisper base model (~150 MB, int8 via CTranslate2)
+RUN python -c "\
+from faster_whisper import WhisperModel; \
+WhisperModel('base', device='cpu', compute_type='int8')"
+
+# spaCy English small model (~50 MB)
+RUN python -m spacy download en_core_web_sm
+
+# ── Application code ───────────────────────────────────
 COPY backend/ ./backend/
 
-# Data dirs (will be mounted as volumes in compose)
+# ── Data directories (will be mounted as volumes) ──────
 RUN mkdir -p /app/data/videos /app/data/frames /app/data/audio \
              /app/data/graphs /app/data/db/chroma
 
+# ── Environment ────────────────────────────────────────
 ENV COGNISTREAM_ROOT=/app
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
 
-# Sibling services in compose
+# Ollama runs in a sibling container
 ENV OLLAMA_BASE_URL=http://ollama:11434
+
+# ChromaDB runs in a sibling container
 ENV CHROMA_HOST=chromadb
 ENV CHROMA_PORT=8000
 
-# Conservative defaults for edge / container deployment
+# Conservative settings for edge deployment
 ENV WHISPER_MODEL_SIZE=base
 ENV WHISPER_DEVICE=cpu
 ENV WHISPER_COMPUTE_TYPE=int8
@@ -109,6 +64,7 @@ ENV LOG_LEVEL=INFO
 
 EXPOSE 8000
 
+# ── Entrypoint ─────────────────────────────────────────
 CMD ["uvicorn", "backend.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \

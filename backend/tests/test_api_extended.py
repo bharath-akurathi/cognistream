@@ -157,7 +157,7 @@ def test_search_basic(mocks):
     assert body["results"][0]["segment_id"] == "s1"
 
     mocks["qe"].search.assert_called_once_with(
-        query="red car", top_k=10, video_id=None, source_filter=None, search_mode="hybrid", agentic=False, min_score=0.0,
+        query="red car", top_k=10, video_id=None, source_filter=None,
     )
 
 
@@ -173,7 +173,7 @@ def test_search_with_video_filter(mocks):
     assert resp.json()["results"] == []
 
     mocks["qe"].search.assert_called_once_with(
-        query="person walking", top_k=5, video_id="v42", source_filter=None, search_mode="hybrid", agentic=False, min_score=0.0,
+        query="person walking", top_k=5, video_id="v42", source_filter=None,
     )
 
 
@@ -191,7 +191,7 @@ def test_search_with_source_filter(mocks):
     assert len(resp.json()["results"]) == 1
 
     mocks["qe"].search.assert_called_once_with(
-        query="dog", top_k=10, video_id=None, source_filter="visual", search_mode="hybrid", agentic=False, min_score=0.0,
+        query="dog", top_k=10, video_id=None, source_filter="visual",
     )
 
 
@@ -952,12 +952,9 @@ def test_browser_chunk_missing_video_data(mocks):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def test_browser_stop_nonexistent_feed(mocks):
-    """Stopping a browser feed that doesn't exist is idempotent — returns 200
-    with an "already closed" message rather than 404, so double-clicking the
-    UI Stop button doesn't surface a confusing error."""
+    """Stopping a browser feed that doesn't exist returns 404."""
     resp = mocks["client"].post("/live/browser-stop?video_id=ghost")
-    assert resp.status_code == 200
-    assert "already closed" in resp.json()["message"].lower()
+    assert resp.status_code == 404
 
 
 def test_browser_stop_existing_feed(mocks):

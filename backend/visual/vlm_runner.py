@@ -270,19 +270,6 @@ class VLMRunner:
             One :class:`VisualCaption` per keyframe, in the same order.
         """
         keyframes = self._prefilter_keyframes_by_novelty(keyframes)
-
-        # Bail out before the (slow) CV pre-filter if the VLM isn't reachable —
-        # there's no point detecting objects we'll never caption. The cloud
-        # VLM path bypasses the local Ollama check.
-        from backend.providers.nvidia import nvidia
-        if not nvidia.available and not self.client.is_available():
-            raise OllamaError(
-                f"Ollama is not reachable at {self.client.base_url} "
-                f"or model '{self.client.model}' is not pulled."
-            )
-
-        # CV pre-filter: skip frames with no interesting objects (VSS 3 2-stage architecture)
-        keyframes = self._prefilter_keyframes_by_cv(keyframes)
         total = len(keyframes)
         if total == 0:
             logger.warning("No keyframes to analyse.")
@@ -294,9 +281,16 @@ class VLMRunner:
             self.client.model,
         )
 
+        if not self.client.is_available():
+            raise OllamaError(
+                f"Ollama is not reachable at {self.client.base_url} "
+                f"or model '{self.client.model}' is not pulled."
+            )
+
         t_start = time.monotonic()
 
         # Choose analysis function: NVIDIA cloud > local fast > local quality
+        from backend.providers.nvidia import nvidia
         if nvidia.available:
             analyse_fn = self._analyse_single_nvidia
             mode_label = "nvidia (cloud)"
@@ -504,58 +498,6 @@ class VLMRunner:
             self.last_reuse_stats["reuse_hits_semantic"] += 1
         return reused
 
-    def _prefilter_keyframes_by_cv(self, keyframes: list[Keyframe]) -> list[Keyframe]:
-        """Skip keyframes that contain no interesting objects.
-
-        Uses fast object detection (NVIDIA Grounding DINO or local YOLO)
-        as a gatekeeper before the slow VLM. Borrowed from VSS 3.
-
-        Side effect: stores detections on each kept keyframe via the
-        `_cv_detections` attribute, so the VLM analyse step can use them
-        for SoM (Set-of-Mark) prompting.
-
-        Fails open at the batch level: if every frame is rejected (likely a
-        broken detector backend rather than a genuinely empty video) the
-        original list is returned untouched, so visual analysis still runs.
-        """
-        from backend.visual.cv_filter import cv_filter
-
-        if not cv_filter.available or not keyframes:
-            return keyframes
-
-        kept = []
-        any_detections_seen = False
-        for kf in keyframes:
-            try:
-                interesting, detections = cv_filter.is_interesting(kf.file_path)
-                if detections:
-                    any_detections_seen = True
-                if interesting:
-                    setattr(kf, "_cv_detections", detections)
-                    kept.append(kf)
-            except Exception:
-                kept.append(kf)
-                any_detections_seen = True  # don't penalise the batch on error
-
-        # If every frame got dropped AND no detector ever returned anything,
-        # the backend is almost certainly broken — pass everything through.
-        if not kept and not any_detections_seen:
-            logger.warning(
-                "CV pre-filter rejected all %d keyframes and never saw any "
-                "detections — assuming detector is unavailable, passing all "
-                "frames through to VLM.",
-                len(keyframes),
-            )
-            return keyframes
-
-        skipped = len(keyframes) - len(kept)
-        if skipped > 0:
-            logger.info(
-                "CV pre-filter: kept %d / %d keyframes (%d skipped, no interesting objects)",
-                len(kept), len(keyframes), skipped,
-            )
-        return kept
-
     def _prefilter_keyframes_by_novelty(self, keyframes: list[Keyframe]) -> list[Keyframe]:
         """Drop near-duplicate keyframes to reduce VLM calls.
 
@@ -630,37 +572,14 @@ class VLMRunner:
 
     # ── single-frame analysis ───────────────────────────────────
 
-    def _prepare_som_inputs(self, keyframe: Keyframe, base_prompt: str) -> tuple[str, str]:
-        """If the keyframe has CV detections, draw SoM overlays + augment prompt.
-
-        Returns (image_path_to_use, prompt_to_use).
-        """
-        detections = getattr(keyframe, "_cv_detections", None)
-        if not detections:
-            return keyframe.file_path, base_prompt
-
-        try:
-            from backend.visual.som_overlay import draw_som, build_som_prompt
-            from pathlib import Path as _Path
-
-            src = _Path(keyframe.file_path)
-            som_path = str(src.parent / f"{src.stem}_som{src.suffix}")
-            draw_som(keyframe.file_path, detections, som_path)
-            augmented_prompt = build_som_prompt(detections, base_prompt)
-            return som_path, augmented_prompt
-        except Exception as exc:
-            logger.debug("SoM overlay failed for frame %d: %s", keyframe.frame_number, exc)
-            return keyframe.file_path, base_prompt
-
     def _analyse_single_nvidia(self, keyframe: Keyframe) -> VisualCaption:
         """Run analysis using NVIDIA cloud VLM (highest quality, requires API key)."""
         from backend.providers.nvidia import nvidia
 
-        # SoM: overlay numbered boxes + augment prompt for cloud VLM (large enough to benefit)
-        image_path, prompt = self._prepare_som_inputs(
-            keyframe, PromptLibrary.combined_prompt(),
-        )
-        combined_raw = nvidia.caption_image(image_path, prompt) or ""
+        combined_raw = nvidia.caption_image(
+            keyframe.file_path,
+            PromptLibrary.combined_prompt(),
+        ) or ""
 
         if not combined_raw.strip():
             # Cloud VLM can fail transiently (DNS/network). Fall back to local

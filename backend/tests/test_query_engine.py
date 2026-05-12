@@ -93,29 +93,3 @@ class TestFormatResults:
 
     def test_format_empty(self):
         assert QueryEngine._format([]) == []
-
-
-class TestVisualSearch:
-    def test_visual_dimension_mismatch_is_skipped(self, monkeypatch):
-        class FakeSigLIP:
-            enabled = True
-
-            def embed_text(self, query):
-                return [0.1] * 768
-
-            def unload(self):
-                pass
-
-        class FakeStore:
-            def query(self, **kwargs):
-                raise ValueError("Collection expecting embedding with dimension of 384, got 768")
-
-        from backend.providers.nvidia import nvidia
-        import backend.visual.siglip_embedder as siglip_module
-
-        monkeypatch.setattr(type(nvidia), "available", property(lambda self: False))
-        monkeypatch.setattr(siglip_module, "SigLIPEmbedder", FakeSigLIP)
-
-        engine = QueryEngine(store=FakeStore())
-
-        assert engine._visual_search("red car", top_k=5, video_id=None) == []

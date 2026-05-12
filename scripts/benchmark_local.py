@@ -29,9 +29,7 @@ def _http_json(url: str, method: str = "GET", payload: dict[str, Any] | None = N
         headers["Content-Type"] = "application/json"
 
     req = urllib.request.Request(url=url, method=method, data=data, headers=headers)
-    # Long timeout: agentic search runs query decomposition + VLM rerank,
-    # which can easily take 60-120s per query through NVIDIA cloud.
-    with urllib.request.urlopen(req, timeout=240) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         raw = resp.read().decode("utf-8")
         return json.loads(raw) if raw else {}
 
@@ -71,7 +69,6 @@ def main() -> int:
     parser.add_argument("--query-file", help="Path to newline-delimited queries file")
     parser.add_argument("--report-json", help="Optional output path for benchmark report JSON")
     parser.add_argument("--with-trend", action="store_true", help="Also fetch /benchmark/trend summary")
-    parser.add_argument("--agentic", action="store_true", help="Use agentic search (query decomposition + VLM rerank)")
     args = parser.parse_args()
 
     queries = _load_queries(args)
@@ -94,7 +91,6 @@ def main() -> int:
                     "query": q,
                     "video_id": args.video_id,
                     "top_k": args.top_k,
-                    "agentic": args.agentic,
                 },
             )
         except urllib.error.HTTPError as exc:

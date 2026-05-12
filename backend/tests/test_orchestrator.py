@@ -224,7 +224,6 @@ class TestProcessHappyPath:
 
 
 class TestProcessVLMUnavailable:
-    @patch("backend.providers.nvidia.nvidia")
     @patch("backend.pipeline.orchestrator.EventDetector")
     @patch("backend.pipeline.orchestrator.KnowledgeGraph")
     @patch("backend.pipeline.orchestrator.MultimodalEmbedder")
@@ -243,7 +242,6 @@ class TestProcessVLMUnavailable:
         MockEmbedder,
         MockKG,
         MockEventDetector,
-        mock_nvidia,
         mock_db,
         mock_store,
         video_meta,
@@ -260,8 +258,7 @@ class TestProcessVLMUnavailable:
         audio_result.audio_path = "/tmp/audio.wav"
         MockAudioExtractor.return_value.extract.return_value = audio_result
 
-        # Neither cloud VLM nor local Ollama VLM available
-        mock_nvidia.available = False
+        # VLM not available
         MockOllamaClient.return_value.is_available.return_value = False
 
         MockWhisperRunner.return_value.transcribe.return_value = sample_transcripts

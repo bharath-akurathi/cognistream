@@ -402,14 +402,10 @@ export async function getLiveFeedStatus(): Promise<LiveFeedInfo[]> {
 export function connectLiveWebSocket(
   videoId: string,
   onEvent: (event: LiveWsEvent) => void,
-  onClose?: () => void,
-  onOpen?: () => void,
-  onError?: (err: string) => void
-): { send: (msg: Record<string, unknown>) => void; close: () => void; isOpen: () => boolean } {
+  onClose?: () => void
+): { send: (msg: Record<string, unknown>) => void; close: () => void } {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws/live/${videoId}`);
-
-  ws.onopen = () => onOpen?.();
 
   ws.onmessage = (event) => {
     try {
@@ -423,10 +419,7 @@ export function connectLiveWebSocket(
   };
 
   ws.onclose = () => onClose?.();
-  ws.onerror = () => {
-    onError?.("WebSocket connection error");
-    onClose?.();
-  };
+  ws.onerror = () => onClose?.();
 
   return {
     send: (msg) => {
@@ -435,7 +428,6 @@ export function connectLiveWebSocket(
       }
     },
     close: () => ws.close(),
-    isOpen: () => ws.readyState === WebSocket.OPEN,
   };
 }
 
@@ -467,146 +459,5 @@ export async function stopBrowserFeed(
     `/live/browser-stop?video_id=${encodeURIComponent(videoId)}`,
     undefined,
     { method: "POST" }
-  );
-}
-
-// ── Alert rules (RTVI) ──────────────────────────────────────
-
-export interface AlertRule {
-  id: string;
-  name: string;
-  type: string;
-  severity: string;
-  enabled: boolean;
-  keywords: string[];
-  object_label: string;
-  threshold: number;
-  window_sec: number;
-  event_type: string;
-  min_confidence: number;
-  video_ids: string[];
-  webhook: boolean;
-  websocket: boolean;
-}
-
-export interface AlertHistoryEntry {
-  id: string;
-  rule_id: string;
-  rule_name: string;
-  severity: string;
-  video_id: string;
-  timestamp: string;
-  triggered_at_sec: number;
-  matched_text: string;
-  segment_id: string;
-  metadata: Record<string, unknown>;
-}
-
-export async function listAlertRules(): Promise<AlertRule[]> {
-  const data = await request<{ rules: AlertRule[] }>("/alerts/rules");
-  return data.rules;
-}
-
-export async function createAlertRule(rule: Partial<AlertRule>): Promise<AlertRule> {
-  return request<AlertRule>("/alerts/rules", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(rule),
-  });
-}
-
-export async function updateAlertRule(id: string, updates: Partial<AlertRule>): Promise<AlertRule> {
-  return request<AlertRule>(`/alerts/rules/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(updates),
-  });
-}
-
-export async function deleteAlertRule(id: string): Promise<void> {
-  await request(`/alerts/rules/${id}`, { method: "DELETE" });
-}
-
-export async function getAlertHistory(
-  videoId?: string,
-  limit = 100
-): Promise<AlertHistoryEntry[]> {
-  const params = new URLSearchParams({ limit: String(limit) });
-  if (videoId) params.set("video_id", videoId);
-  const data = await request<{ alerts: AlertHistoryEntry[] }>(
-    `/alerts/history?${params}`
-  );
-  return data.alerts;
-}
-
-// ── Use case templates ──────────────────────────────────────
-
-export interface UseCaseTemplate {
-  id: string;
-  name: string;
-  description: string;
-  detection_labels: string[];
-  alert_rule_count: number;
-  default_report_template: string;
-  chunk_sec: number;
-  suggested_queries: string[];
-}
-
-export async function listUseCaseTemplates(): Promise<UseCaseTemplate[]> {
-  const data = await request<{ templates: UseCaseTemplate[] }>("/templates");
-  return data.templates;
-}
-
-export async function applyUseCaseTemplate(id: string): Promise<{
-  template: string;
-  name: string;
-  rules_added: string[];
-  detection_labels: string[];
-}> {
-  return request(`/templates/${id}/apply`, { method: "POST" });
-}
-
-// ── LLM-powered reports ─────────────────────────────────────
-
-export interface ReportTemplate {
-  id: string;
-  name: string;
-  description: string;
-}
-
-export interface VideoReport {
-  video_id: string;
-  filename: string;
-  duration_sec: number;
-  template: string;
-  template_name: string;
-  generated_at: string;
-  model: string;
-  summary: string;
-  stats: {
-    segments_analyzed: number;
-    events_detected: number;
-    annotations: number;
-  };
-  key_moments: Array<{
-    time_sec: number;
-    type: string;
-    label: string;
-    description: string;
-  }>;
-}
-
-export async function listReportTemplates(): Promise<ReportTemplate[]> {
-  const data = await request<{ templates: ReportTemplate[] }>("/report/templates");
-  return data.templates;
-}
-
-export async function generateVideoReport(
-  videoId: string,
-  template = "executive"
-): Promise<VideoReport> {
-  return request<VideoReport>(
-    `/video/${videoId}/report/generate?template=${template}`,
-    { method: "POST", timeout: 120000 }
   );
 }

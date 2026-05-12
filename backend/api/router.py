@@ -25,7 +25,6 @@ import asyncio
 import json
 import logging
 import math
-import mimetypes
 import shutil
 import subprocess
 import threading
@@ -35,8 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.config import (
@@ -93,48 +92,6 @@ def cleanup_progress(video_id: str) -> None:
         _progress_events.pop(video_id, None)
 
 
-def _parse_range_header(range_header: str, file_size: int) -> tuple[int | None, int | None]:
-    """Parse a single HTTP bytes range into inclusive start/end offsets."""
-    if file_size <= 0 or not range_header.startswith("bytes="):
-        return None, None
-
-    range_spec = range_header.removeprefix("bytes=").split(",", 1)[0].strip()
-    if "-" not in range_spec:
-        return None, None
-
-    start_text, end_text = range_spec.split("-", 1)
-    try:
-        if start_text == "":
-            suffix_length = int(end_text)
-            if suffix_length <= 0:
-                return None, None
-            start = max(file_size - suffix_length, 0)
-            end = file_size - 1
-        else:
-            start = int(start_text)
-            end = int(end_text) if end_text else file_size - 1
-    except ValueError:
-        return None, None
-
-    if start < 0 or end < start or start >= file_size:
-        return None, None
-
-    return start, min(end, file_size - 1)
-
-
-def _iter_file_range(path: Path, start: int, end: int, chunk_size: int = 1024 * 1024):
-    """Yield bytes from path between inclusive offsets start and end."""
-    with path.open("rb") as handle:
-        handle.seek(start)
-        remaining = end - start + 1
-        while remaining > 0:
-            chunk = handle.read(min(chunk_size, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-
-
 def _save_benchmark(video_id: str, payload: dict[str, Any]) -> None:
     run = {
         "id": uuid.uuid4().hex,
@@ -183,7 +140,7 @@ def _queue_worker() -> None:
 _db = SQLiteDB()
 _store = ChromaStore()
 _embedder = MultimodalEmbedder()
-_query_engine = QueryEngine(embedder=_embedder, store=_store, db=_db)
+_query_engine = QueryEngine(embedder=_embedder, store=_store)
 _orchestrator = PipelineOrchestrator(db=_db, store=_store, on_progress=_on_progress)
 
 # ── Live feed WebSocket management ──
@@ -206,17 +163,12 @@ def _on_live_event(event: LiveEvent) -> None:
     })
     for ws in clients:
         try:
-            # Coroutines must be created in the event loop's thread, not in
-            # the streaming background thread. Wrap in a lambda so the
-            # coroutine is constructed at scheduling time, not at call_soon
-            # invocation time. Without this fix, messages never reach the
-            # client because the coroutine is evaluated in the wrong thread
-            # context and silently dropped.
             _event_loop.call_soon_threadsafe(
-                lambda w=ws, p=payload: asyncio.ensure_future(w.send_text(p))
+                asyncio.ensure_future,
+                ws.send_text(payload),
             )
-        except Exception as exc:
-            logger.debug("Failed to schedule WS send: %s", exc)
+        except Exception:
+            pass  # Client may have disconnected
 
 
 _streaming_pipeline = StreamingPipeline(
@@ -248,9 +200,6 @@ class SearchRequest(BaseModel):
     video_id: Optional[str] = None
     top_k: int = Field(default=10, ge=1, le=_MAX_TOP_K)
     source_filter: Optional[str] = None
-    search_mode: str = Field(default="hybrid", description="Search mode: 'visual' (vector only), 'speech' (FTS5 only), 'hybrid' (both)")
-    agentic: bool = Field(default=False, description="Enable agentic search (decompose + VLM rerank)")
-    min_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Minimum score threshold — results below this are filtered out")
 
 
 class SimilarRequest(BaseModel):
@@ -745,14 +694,10 @@ async def search(req: SearchRequest):
         top_k=req.top_k,
         video_id=req.video_id,
         source_filter=req.source_filter,
-        search_mode=req.search_mode,
-        agentic=req.agentic,
-        min_score=req.min_score,
     )
 
     return {
         "query": req.query,
-        "result_count": len(results),
         "results": [
             {
                 "video_id": r.video_id,
@@ -764,8 +709,6 @@ async def search(req: SearchRequest):
                 "score": r.score,
                 "event_type": r.event_type,
                 "frame_url": r.frame_url,
-                "speech_snippet": r.speech_snippet,
-                "related_count": r.related_count,
             }
             for r in results
         ],
@@ -816,13 +759,8 @@ async def get_video(video_id: str):
 
 
 @router.get("/video/{video_id}/stream")
-async def stream_video(video_id: str, request: Request):
-    """Stream the video file with explicit HTTP range support.
-
-    Browser video elements rely on byte ranges for large files, metadata
-    probing, and seeking.  Serving ranges ourselves keeps playback reliable
-    across Starlette versions and avoids forcing every upload to video/mp4.
-    """
+async def stream_video(video_id: str):
+    """Stream the video file (supports range requests via FileResponse)."""
     meta = _db.get_video(video_id)
     if meta is None:
         raise HTTPException(404, f"Video not found: {video_id}")
@@ -831,44 +769,10 @@ async def stream_video(video_id: str, request: Request):
     if not path.is_file():
         raise HTTPException(404, "Video file not found on disk.")
 
-    file_size = path.stat().st_size
-    media_type = mimetypes.guess_type(meta.filename or path.name)[0] or "application/octet-stream"
-    range_header = request.headers.get("range")
-
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Type": media_type,
-        "Content-Disposition": "inline",
-    }
-
-    if not range_header:
-        headers["Content-Length"] = str(file_size)
-        return StreamingResponse(
-            _iter_file_range(path, 0, file_size - 1),
-            media_type=media_type,
-            headers=headers,
-        )
-
-    start, end = _parse_range_header(range_header, file_size)
-    if start is None or end is None:
-        return Response(
-            status_code=416,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Range": f"bytes */{file_size}",
-            },
-        )
-
-    content_length = end - start + 1
-    headers.update({
-        "Content-Length": str(content_length),
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
-    })
-    return StreamingResponse(
-        _iter_file_range(path, start, end),
-        status_code=206,
-        media_type=media_type,
-        headers=headers,
+    return FileResponse(
+        path=str(path),
+        media_type="video/mp4",
+        filename=meta.filename,
     )
 
 
@@ -1082,216 +986,6 @@ async def get_video_report(video_id: str):
             "items": annotations,
         },
     }
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MCP (Model Context Protocol) tool surface
-# Inspired by NVIDIA VSS 3 — exposes CogniStream as MCP tools so any
-# MCP-compatible client (Claude Desktop, Cursor, etc.) can drive it.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@router.get("/mcp/tools")
-async def mcp_list_tools():
-    """List all MCP tools exposed by CogniStream."""
-    from backend.mcp_server import list_tools
-    return {"tools": list_tools()}
-
-
-class MCPCallRequest(BaseModel):
-    name: str
-    arguments: dict = Field(default_factory=dict)
-
-
-@router.post("/mcp/call")
-async def mcp_call_tool(req: MCPCallRequest):
-    """Invoke an MCP tool by name with the given arguments."""
-    from backend.mcp_server import call_tool, TOOL_REGISTRY
-    if req.name not in TOOL_REGISTRY:
-        raise HTTPException(404, f"Unknown tool: {req.name}")
-    return call_tool(req.name, req.arguments)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# LLM-powered report generation
-# Inspired by NVIDIA Metropolis VSS 3 automatic report generation
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class ReportGenerateRequest(BaseModel):
-    template: str = "executive"
-    scenario: Optional[str] = Field(default=None, description="Domain context (e.g. 'warehouse aisle')")
-    events_to_track: list[str] = Field(default_factory=list, description="Specific events to look for")
-    objects_of_interest: list[str] = Field(default_factory=list, description="Specific objects to highlight")
-
-
-@router.post("/video/{video_id}/report/generate")
-async def generate_video_report(
-    video_id: str,
-    req: Optional[ReportGenerateRequest] = None,
-    template: str = Query("executive"),
-):
-    """Generate an LLM-summarized report for a video.
-
-    Templates: executive, incident, timeline, activity
-
-    Three-parameter contract (borrowed from NVIDIA VSS 3):
-        - scenario: domain context
-        - events_to_track: specific events
-        - objects_of_interest: specific objects
-
-    Uses NVIDIA cloud Llama if available, otherwise falls back to local Ollama.
-    """
-    meta = _db.get_video(video_id)
-    if meta is None:
-        raise HTTPException(404, f"Video not found: {video_id}")
-
-    from backend.reports import report_generator, REPORT_TEMPLATES
-
-    # Pull params from request body if provided, else from query string
-    if req is not None:
-        chosen_template = req.template
-        scenario = req.scenario
-        events_to_track = req.events_to_track
-        objects_of_interest = req.objects_of_interest
-    else:
-        chosen_template = template
-        scenario = None
-        events_to_track = []
-        objects_of_interest = []
-
-    if chosen_template not in REPORT_TEMPLATES:
-        raise HTTPException(400, f"Unknown template '{chosen_template}'. Available: {list(REPORT_TEMPLATES.keys())}")
-
-    segments = _store.get_by_video(video_id)
-    events = _db.list_events(video_id)
-    annotations = _db.list_annotations(video_id)
-
-    video_meta = {
-        "video_id": meta.id,
-        "filename": meta.filename,
-        "duration_sec": meta.duration_sec,
-    }
-
-    report = report_generator.generate(
-        video_meta=video_meta,
-        segments=segments,
-        events=events,
-        annotations=annotations,
-        template=chosen_template,
-        scenario=scenario,
-        events_to_track=events_to_track,
-        objects_of_interest=objects_of_interest,
-    )
-    return report
-
-
-@router.get("/report/templates")
-async def list_report_templates():
-    """List available LLM report templates."""
-    from backend.reports import REPORT_TEMPLATES
-    return {
-        "templates": [
-            {"id": k, "name": v["name"], "description": v["description"]}
-            for k, v in REPORT_TEMPLATES.items()
-        ]
-    }
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Alert rules engine
-# Inspired by NVIDIA Metropolis VSS 3 RTVI alerts
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class AlertRuleRequest(BaseModel):
-    name: str
-    type: str = Field(description="keyword_match | object_count | event_match | anomaly")
-    severity: str = "medium"
-    enabled: bool = True
-    keywords: list[str] = []
-    object_label: str = ""
-    threshold: int = 1
-    window_sec: float = 30.0
-    event_type: str = ""
-    min_confidence: float = 0.5
-    video_ids: list[str] = []
-    webhook: bool = True
-    websocket: bool = True
-
-
-@router.get("/alerts/rules")
-async def list_alert_rules():
-    """List all configured alert rules."""
-    from backend.alerts import alert_engine
-    from dataclasses import asdict
-    return {"rules": [asdict(r) for r in alert_engine.list_rules()]}
-
-
-@router.post("/alerts/rules", status_code=201)
-async def create_alert_rule(req: AlertRuleRequest):
-    """Create a new alert rule."""
-    from backend.alerts import alert_engine
-    from dataclasses import asdict
-    rule = alert_engine.add_rule(req.dict())
-    return asdict(rule)
-
-
-@router.put("/alerts/rules/{rule_id}")
-async def update_alert_rule(rule_id: str, updates: dict):
-    """Update an existing alert rule."""
-    from backend.alerts import alert_engine
-    from dataclasses import asdict
-    rule = alert_engine.update_rule(rule_id, updates)
-    if rule is None:
-        raise HTTPException(404, f"Rule not found: {rule_id}")
-    return asdict(rule)
-
-
-@router.delete("/alerts/rules/{rule_id}")
-async def delete_alert_rule(rule_id: str):
-    """Delete an alert rule."""
-    from backend.alerts import alert_engine
-    if not alert_engine.remove_rule(rule_id):
-        raise HTTPException(404, f"Rule not found: {rule_id}")
-    return {"message": "Rule deleted", "id": rule_id}
-
-
-@router.get("/alerts/history")
-async def alert_history(video_id: Optional[str] = Query(None), limit: int = Query(100)):
-    """Return recent alert events."""
-    from backend.alerts import alert_engine
-    return {"alerts": alert_engine.history(limit=limit, video_id=video_id)}
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Use case templates
-# Inspired by NVIDIA Metropolis VSS 3 industry examples
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-@router.get("/templates")
-async def list_use_case_templates():
-    """List all available use case templates (surveillance, smart_city, warehouse, etc.)"""
-    from backend.use_case_templates import list_templates
-    return {"templates": list_templates()}
-
-
-@router.get("/templates/{template_id}")
-async def get_use_case_template(template_id: str):
-    """Get details of a specific use case template."""
-    from backend.use_case_templates import get_template
-    from dataclasses import asdict
-    t = get_template(template_id)
-    if t is None:
-        raise HTTPException(404, f"Template not found: {template_id}")
-    return asdict(t)
-
-
-@router.post("/templates/{template_id}/apply")
-async def apply_use_case_template(template_id: str):
-    """Apply a use case template — adds its alert rules to the engine."""
-    from backend.use_case_templates import apply_template
-    result = apply_template(template_id)
-    if "error" in result:
-        raise HTTPException(404, result["error"])
-    return result
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1665,21 +1359,13 @@ async def upload_browser_chunk(
             mp4_path,
         ]
         convert_result = subprocess.run(convert_cmd, capture_output=True, timeout=60)
-        # Defensive: stat() on a non-existent file raises FileNotFoundError.
-        # FFmpeg may exit 0 without producing output on edge cases, so always
-        # check existence before checking size.
-        mp4_ok = False
-        if convert_result.returncode == 0:
-            try:
-                mp4_ok = Path(mp4_path).stat().st_size > 500
-            except (FileNotFoundError, OSError):
-                mp4_ok = False
-        if mp4_ok:
+        if convert_result.returncode == 0 and Path(mp4_path).stat().st_size > 500:
             video_chunk_path = mp4_path
         else:
+            # Fallback: try the raw webm
             video_chunk_path = tmp_path
             mp4_path = None
-            logger.warning("FFmpeg webm->mp4 conversion failed, using raw webm")
+            logger.warning("FFmpeg webm→mp4 conversion failed, using raw webm")
 
         # Extract keyframes from the chunk video
         cap = _cv2.VideoCapture(video_chunk_path)
@@ -1837,21 +1523,6 @@ async def upload_browser_chunk(
             "keyframes_extracted": len(keyframes),
         }
 
-    except Exception:
-        # If processing failed on the FIRST chunk (chunk_index == 0) and we
-        # just created the feed entry, tear it down to avoid leaking the
-        # MultimodalEmbedder. Subsequent chunks (idx > 0) leave the feed
-        # in place so the user can recover by retrying.
-        if chunk_index == 0:
-            with _browser_feeds_lock:
-                stale = _browser_feeds.pop(video_id, None)
-            if stale is not None:
-                try:
-                    stale.get("embedder").unload_model()
-                except Exception:
-                    pass
-        raise
-
     finally:
         Path(tmp_path).unlink(missing_ok=True)
         # Clean up converted mp4 if it exists
@@ -1861,48 +1532,35 @@ async def upload_browser_chunk(
 
 @router.post("/live/browser-stop")
 async def stop_browser_feed(video_id: str = Query(...)):
-    """Finalize a browser camera feed — build knowledge graph and clean up.
-
-    Idempotent: returning 200 even if the feed is already closed avoids
-    confusing UI errors when the user double-clicks Stop.
-    """
+    """Finalize a browser camera feed — build knowledge graph and clean up."""
     with _browser_feeds_lock:
         feed = _browser_feeds.pop(video_id, None)
 
     if feed is None:
-        return {
-            "video_id": video_id,
-            "message": "Browser feed already closed or not found.",
-            "events_detected": 0,
-        }
+        raise HTTPException(404, f"No browser feed: {video_id}")
 
+    # Build knowledge graph in background
     captions = feed["all_captions"]
     transcripts = feed["all_transcripts"]
     embedder = feed["embedder"]
-    events = []
 
-    try:
-        if captions or transcripts:
-            from backend.knowledge.graph import KnowledgeGraph
-            from backend.knowledge.event_detector import EventDetector
+    if captions or transcripts:
+        from backend.knowledge.graph import KnowledgeGraph
+        from backend.knowledge.event_detector import EventDetector
 
-            kg = KnowledgeGraph(video_id)
-            kg.build_from_captions(captions, transcripts)
-            kg.save()
+        kg = KnowledgeGraph(video_id)
+        kg.build_from_captions(captions, transcripts)
+        kg.save()
 
-            detector = EventDetector()
-            events = detector.detect(kg)
-            if events:
-                from backend.pipeline.streaming import StreamingPipeline
-                event_segments = StreamingPipeline._events_to_segments(video_id, events)
-                embedder.embed(event_segments)
-                _store.add_segments(event_segments)
-    finally:
-        # Always unload the embedder, even if KG/event detection raised.
-        try:
-            embedder.unload_model()
-        except Exception as exc:
-            logger.debug("Embedder unload failed during browser-stop: %s", exc)
+        detector = EventDetector()
+        events = detector.detect(kg)
+        if events:
+            from backend.pipeline.streaming import StreamingPipeline
+            event_segments = StreamingPipeline._events_to_segments(video_id, events)
+            embedder.embed(event_segments)
+            _store.add_segments(event_segments)
+
+    embedder.unload_model()
 
     return {
         "video_id": video_id,
