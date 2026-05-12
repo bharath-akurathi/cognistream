@@ -29,6 +29,11 @@ export default function VideoPlayer({
   const seekTrackRef = useRef<HTMLDivElement>(null);
   const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoadError(null);
+  }, [videoUrl]);
 
   const getTimeFromClientX = useCallback(
     (clientX: number) => {
@@ -101,13 +106,23 @@ export default function VideoPlayer({
   return (
     <div style={styles.container}>
       <video
+        key={videoUrl}
         ref={videoRef}
         src={videoUrl}
+        preload="metadata"
+        playsInline
         onTimeUpdate={onTimeUpdate}
-        onLoadedMetadata={onLoadedMetadata}
+        onLoadedMetadata={() => {
+          setLoadError(null);
+          onLoadedMetadata();
+        }}
+        onError={() => {
+          setLoadError("This video could not be loaded by the browser. Try an MP4/H.264 source or re-encode the file.");
+        }}
         style={styles.video}
         onClick={togglePlay}
       />
+      {loadError && <div style={styles.errorBanner}>{loadError}</div>}
 
       <div style={styles.transport}>
         <div style={styles.transportHeader}>
@@ -261,6 +276,13 @@ const styles: Record<string, React.CSSProperties> = {
     maxHeight: "450px",
     objectFit: "contain",
     background: "#000",
+  },
+  errorBanner: {
+    padding: "10px 14px",
+    background: "#fee2e2",
+    color: "#991b1b",
+    fontSize: "13px",
+    borderTop: "1px solid #fecaca",
   },
   transport: {
     display: "flex",

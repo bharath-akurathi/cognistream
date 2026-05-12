@@ -36,7 +36,7 @@ export function useSearch(videoId?: string): UseSearchReturn {
         top_k: 20,
         search_mode: searchMode,
       });
-      setResults(response.results);
+      setResults(orderSearchResults(response.results, searchMode));
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Search failed. Is the backend running?";
@@ -54,4 +54,25 @@ export function useSearch(videoId?: string): UseSearchReturn {
   }, []);
 
   return { results, isLoading, error, query, searchMode, setSearchMode, search, clear, setResults };
+}
+
+export function orderSearchResults(results: SearchResult[], searchMode: SearchMode): SearchResult[] {
+  if (searchMode !== "hybrid") {
+    return results;
+  }
+
+  return [...results].sort((a, b) => {
+    const aGroup = isSpeechResult(a) ? 0 : 1;
+    const bGroup = isSpeechResult(b) ? 0 : 1;
+    if (aGroup !== bGroup) return aGroup - bGroup;
+    return b.score - a.score;
+  });
+}
+
+function isSpeechResult(result: SearchResult): boolean {
+  return (
+    result.source_type === "speech" ||
+    result.source_type === "audio" ||
+    Boolean(result.speech_snippet)
+  );
 }
